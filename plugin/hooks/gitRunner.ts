@@ -13,14 +13,15 @@
  * accessors below; what it reads of the hooks module's (the session's data,
  * view and folder) and asks of it (a redraw, a save) it imports from there.
  */
-import type { EngineInterface, Timer } from 'claude-code'
+import type { Timer } from 'claude-code'
+import type { EngineCalls } from './register'
 
 import { addedFileHunks, filePatchesOf, hunksOf, type Hunk } from './diff'
 import * as FB from './files'
 import * as F from './format'
 import * as G from './git'
 import * as M from './model'
-import { currentCwd, currentData, currentView, redraw, redrawIfChanged, save } from './register'
+import { currentCwd, currentData, currentView } from './register'
 import * as R from './repos'
 import * as W from './web'
 import { isSharing, nodeCwd } from './webServer'
@@ -83,7 +84,6 @@ export function closeCommit(): void {
   commit = null
 }
 
-const REPO_PIN = { plugin: 'eagle-eye', key: 'repo' } as const
 
 /** Which repository each directory agents edit in belongs to, and the one the deck follows. */
 let book: R.RepoBook = R.emptyBook()
@@ -96,10 +96,10 @@ let shownRoot: string | null = null
 const gitTold = new Set<string>()
 
 /** Says `text` once a session (a toast), however often git meets it again. */
-function tellGitOnce($: EngineInterface, text: string) {
+function tellGitOnce(host: EngineCalls, text: string) {
   if (gitTold.has(text)) return
   gitTold.add(text)
-  $.ui.toast(text)
+  host.toast(text)
 }
 
 /** A git run's outcome: whether it exited 0, and what it printed. */
@@ -117,11 +117,11 @@ let userHome: string | null = null
  * `G.MOST_ATTR_BYTES`. Their texts, the places not there, or the first one
  * that is a link, no plain file, too big or unreadable (`refused`).
  */
-async function readAttrFiles($: EngineInterface, root: string, places: readonly string[]): Promise<{ texts: string[]; missing: string[] } | { refused: string }> {
+async function readAttrFiles(host: EngineCalls, root: string, places: readonly string[]): Promise<{ texts: string[]; missing: string[] } | { refused: string }> {
   const stats = await Promise.all(
     places.map(async place => {
       try {
-        return { place, stat: await $.fs.stat(joinPath(root, place)) }
+        return { place, stat: await host.statFile(joinPath(root, place)) }
       } catch {
         return { place, stat: null }
       }
@@ -134,7 +134,7 @@ async function readAttrFiles($: EngineInterface, root: string, places: readonly 
     if (stat.isLink || stat.kind !== 'file' || stat.size > G.MOST_ATTR_BYTES) return { refused: place }
     wanted.push({ place, abs: joinPath(root, place), size: stat.size, mtimeMs: stat.mtimeMs })
   }
-  const read = await readSafely($, root, wanted, G.MOST_ATTR_BYTES, G.MOST_ATTR_BYTES)
+  const read = await readSafely(host, root, wanted, G.MOST_ATTR_BYTES, G.MOST_ATTR_BYTES)
   const texts: string[] = []
   for (const one of wanted) {
     const got = read.get(one.place)
@@ -143,7 +143,7 @@ async function readAttrFiles($: EngineInterface, root: string, places: readonly 
     else if (got === undefined && isNodeMissing) {
       // no node to read it safely: the engine's read, after the look above. Only the filter names in it are taken, never shown, so a link swapped in here hands over no text
       try {
-        texts.push(await $.fs.read(one.abs))
+        texts.push(await host.readFile(one.abs))
       } catch {
         return { refused: one.place }
       }
@@ -173,23 +173,23 @@ function folderAndName(path: string): [string, string] {
  * unreadable is a refusal, as is a list git could not give. None of their
  * text is ever shown.
  */
-async function attrNamesIn($: EngineInterface, where: string, listing: string, lists: { attrs: GitRun; ignored: GitRun; info: GitRun }, run: (argv: readonly string[], ms: number) => Promise<GitRun>): Promise<string[] | { refusal: string }> {
+async function attrNamesIn(host: EngineCalls, where: string, listing: string, lists: { attrs: GitRun; ignored: GitRun; info: GitRun }, run: (argv: readonly string[], ms: number) => Promise<GitRun>): Promise<string[] | { refusal: string }> {
   const { attrs, ignored, info } = lists
   if (!attrs.ok || !ignored.ok || !info.ok) return { refusal: 'git could not list its attribute files' }
   const places = G.attrPlacesOf(attrs.out, ignored.out)
   if (places.length > G.MOST_ATTR_FILES) return { refusal: G.attrRefusalOf(`${places.length} .gitattributes files`) }
-  if (userHome === null) userHome = ((await $.env.get('USERPROFILE').catch(() => undefined)) ?? (await $.env.get('HOME').catch(() => undefined)) ?? '').trim()
+  if (userHome === null) userHome = ((await host.userProfile().catch(() => undefined)) ?? (await host.home().catch(() => undefined)) ?? '').trim()
   const named = G.attributesFileOf(listing, where, userHome)
   if (typeof named !== 'string') return named
   const infoPath = info.out.replace(/\r?\n$/, '')
   const outside = [infoPath === '' ? '' : /^(?:[\\/]|[A-Za-z]:[\\/])/.test(infoPath) ? infoPath : joinPath(where, infoPath), named].filter(one => one !== '')
   const texts: string[] = []
-  const inTree = await readAttrFiles($, where, places)
+  const inTree = await readAttrFiles(host, where, places)
   if ('refused' in inTree) return { refusal: G.attrRefusalOf(inTree.refused) }
   texts.push(...inTree.texts)
   for (const path of outside) {
     const [folder, name] = folderAndName(path)
-    const one = await readAttrFiles($, folder, [name])
+    const one = await readAttrFiles(host, folder, [name])
     if ('refused' in one) return { refusal: G.attrRefusalOf(path) }
     texts.push(...one.texts)
   }
@@ -219,13 +219,13 @@ async function attrNamesIn($: EngineInterface, where: string, listing: string, l
  * Git starts in the session's own folder and changes to `where` itself
  * (`G.argvIn`).
  */
-export async function runGit($: EngineInterface, args: readonly string[], timeoutMs = 15_000, where = git.root): Promise<GitRun> {
+export async function runGit(host: EngineCalls, args: readonly string[], timeoutMs = 15_000, where = git.root): Promise<GitRun> {
   if (!where) return { ok: false, out: '', err: 'not in a git repository' }
   const refused = gitRefused.get(R.keyOf(where))
   if (refused !== undefined) return { ok: false, out: '', err: refused }
   const run = async (argv: readonly string[], ms: number): Promise<GitRun> => {
     try {
-      const ran = await $.process.run(argv, { env: G.GIT_ENV, timeoutMs: ms })
+      const ran = await host.runProcess(argv, { env: G.GIT_ENV, timeoutMs: ms })
       return { ok: ran.exitCode === 0, out: ran.stdout, err: ran.stderr }
     } catch (error) {
       return { ok: false, out: '', err: error instanceof Error ? error.message : String(error) }
@@ -242,43 +242,43 @@ export async function runGit($: EngineInterface, args: readonly string[], timeou
   ])
   if (!listed.ok) {
     const why = G.configRefusalOf(listed.err)
-    if (why === G.OLD_GIT) tellGitOnce($, why)
+    if (why === G.OLD_GIT) tellGitOnce(host, why)
     return { ok: false, out: '', err: why }
   }
   const name = F.baseName(R.cleanPath(where))
   // the filters the repository's attribute files name, blanked too, so a definition it writes into its config after this read cannot attach to one (a race)
-  const names = isTree ? await attrNamesIn($, where, listed.out, { attrs, ignored, info }, run) : []
+  const names = isTree ? await attrNamesIn(host, where, listed.out, { attrs, ignored, info }, run) : []
   const plan = Array.isArray(names) ? G.repoConfigOf(listed.out, names) : names
   if ('refusal' in plan) {
-    tellGitOnce($, `${name}: ${plan.refusal}`)
+    tellGitOnce(host, `${name}: ${plan.refusal}`)
     return { ok: false, out: '', err: plan.refusal }
   }
-  if (plan.drivers.length > 0) tellGitOnce($, `Changes reads ${name} with its own git ${plan.drivers.length === 1 ? 'filter' : 'filters'} (${plan.drivers.join(', ')}) off: files ${plan.drivers.length === 1 ? 'it handles' : 'they handle'} may show as changed.`)
+  if (plan.drivers.length > 0) tellGitOnce(host, `Changes reads ${name} with its own git ${plan.drivers.length === 1 ? 'filter' : 'filters'} (${plan.drivers.join(', ')}) off: files ${plan.drivers.length === 1 ? 'it handles' : 'they handle'} may show as changed.`)
   const ran = await run(G.argvIn(args, where, plan.overrides), timeoutMs)
   if (!isTree) return ran
   // a filter defined while git ran (the race): what it printed is dropped, and the repository refused from now on
   const after = await run(G.argvIn(G.argv.config, where), ms)
   if (!after.ok || G.filterSettingsOf(after.out) !== G.filterSettingsOf(listed.out)) {
     gitRefused.set(R.keyOf(where), G.SETTINGS_MOVED)
-    tellGitOnce($, `${name}: ${G.SETTINGS_MOVED}`)
+    tellGitOnce(host, `${name}: ${G.SETTINGS_MOVED}`)
     return { ok: false, out: '', err: G.SETTINGS_MOVED }
   }
   return ran
 }
 
 /** The root of the repository holding `dir` as git spells it; null outside one, or where git cannot run. */
-async function probeRoot($: EngineInterface, dir: string): Promise<string | null> {
-  const ran = await runGit($, G.argv.toplevel, 10_000, dir || '.')
+async function probeRoot(host: EngineCalls, dir: string): Promise<string | null> {
+  const ran = await runGit(host, G.argv.toplevel, 10_000, dir || '.')
   return (ran.ok && R.rootOf(ran.out)) || null
 }
 
 /** Probes what the book has not seen yet (the session's directory, a kept pin, each new edited directory), four at a time; then looks once into a session's directory in no repository. */
-async function discoverRepos($: EngineInterface): Promise<void> {
+async function discoverRepos(host: EngineCalls): Promise<void> {
   const probes = R.probesOf(book)
   for (let i = 0; i < probes.length; i += 4) {
-    await Promise.all(probes.slice(i, i + 4).map(async probe => R.settle(book, probe, await probeRoot($, probe.dir))))
+    await Promise.all(probes.slice(i, i + 4).map(async probe => R.settle(book, probe, await probeRoot(host, probe.dir))))
   }
-  if (R.needsNearby(book)) await lookNearby($)
+  if (R.needsNearby(book)) await lookNearby(host)
 }
 
 /**
@@ -287,11 +287,11 @@ async function discoverRepos($: EngineInterface): Promise<void> {
  * worktree's file), and when that last changed. No git runs: one listing and
  * a stat a child, sixteen at a time; what it found is kept for that directory.
  */
-async function lookNearby($: EngineInterface): Promise<void> {
+async function lookNearby(host: EngineCalls): Promise<void> {
   const dir = book.cwd
   let names: string[] = []
   try {
-    names = R.childDirsOf(await $.fs.list(dir))
+    names = R.childDirsOf(await host.listFiles(dir))
   } catch {
     // a directory that cannot be listed offers no picks
   }
@@ -300,7 +300,7 @@ async function lookNearby($: EngineInterface): Promise<void> {
     await Promise.all(
       names.slice(i, i + 16).map(async name => {
         try {
-          const stat = await $.fs.stat(R.childOf(R.childOf(dir, name), '.git'))
+          const stat = await host.statFile(R.childOf(R.childOf(dir, name), '.git'))
           if (stat.kind !== 'other') found.push({ name, changedAt: stat.mtimeMs })
         } catch {
           // no .git there: not a repository's top
@@ -317,18 +317,18 @@ function bookFields(): Pick<G.GitState, 'repos' | 'pinned' | 'isCwdRepo' | 'near
 }
 
 /** Keeps the pin in `$.state`, so a reload of the deck keeps it too. */
-function savePin($: EngineInterface) {
+function savePin(host: EngineCalls) {
   if (book.pinned === savedPin) return
   savedPin = book.pinned
-  void $.state.set(REPO_PIN, book.pinned).catch(() => undefined)
+  void host.writeRepoPin(book.pinned).catch(() => undefined)
 }
 
 /** Starts following the work: the session's repository, the ones restored edits lie in, and a pin kept from before a reload. */
-export async function startRepos($: EngineInterface): Promise<void> {
+export async function startRepos(host: EngineCalls): Promise<void> {
   R.setCwd(book, currentCwd())
   for (const edit of currentData().edits) R.noteEdit(book, edit.abs, edit.at)
   try {
-    const { value } = await $.state.get(REPO_PIN)
+    const { value } = await host.readRepoPin()
     if (typeof value === 'string') {
       book.pinned = value
       savedPin = value
@@ -336,7 +336,7 @@ export async function startRepos($: EngineInterface): Promise<void> {
   } catch {
     // no pin kept: the deck follows the work
   }
-  await refreshGit($, true)
+  await refreshGit(host, true)
 }
 
 /**
@@ -345,20 +345,20 @@ export async function startRepos($: EngineInterface): Promise<void> {
  * work again: the repository an agent edited last, else the session's own.
  * Answers why it could not ('' when it did).
  */
-export async function chooseRepo($: EngineInterface, root: string): Promise<string> {
+export async function chooseRepo(host: EngineCalls, root: string): Promise<string> {
   const wanted = root.trim()
   let pin = ''
   if (wanted) {
     const known = R.lookup(book, wanted)
-    pin = (known === undefined ? await probeRoot($, wanted) : known) ?? ''
+    pin = (known === undefined ? await probeRoot(host, wanted) : known) ?? ''
     if (!pin) return `Not in a git repository: ${wanted}`
     if (known === undefined) R.settleDir(book, wanted, pin)
   }
   book.pinned = pin
-  savePin($)
+  savePin(host)
   git = { ...git, ...bookFields() }
-  redraw($)
-  await refreshGit($, true)
+  host.redraw()
+  await refreshGit(host, true)
   return ''
 }
 
@@ -366,7 +366,7 @@ export async function chooseRepo($: EngineInterface, root: string): Promise<stri
  * Moves the deck to the repository at `root` ('' for none): the file and
  * commit open in the last one close, and edits read from the new root.
  */
-function switchRepo($: EngineInterface, root: string) {
+function switchRepo(host: EngineCalls, root: string) {
   const from = shownRoot ?? R.rootOfEdits(currentData().edits)
   if (shownRoot !== null || (from !== '' && !R.sameRoot(from, root))) {
     fileDiff = null
@@ -380,7 +380,7 @@ function switchRepo($: EngineInterface, root: string) {
   shownRoot = root
   lastHeavyAt = 0
   git = { ...G.emptyGit(), root, ...bookFields() }
-  save($)
+  host.save()
 }
 
 function joinPath(root: string, rel: string): string {
@@ -388,9 +388,9 @@ function joinPath(root: string, rel: string): string {
 }
 
 /** The repository's own place as the file system resolves it (every link folded), for judging whether an untracked file's own place is inside it; `root` itself when it cannot be resolved. */
-async function rootRealOf($: EngineInterface, root: string): Promise<string> {
+async function rootRealOf(host: EngineCalls, root: string): Promise<string> {
   try {
-    const stat = await $.fs.stat(root, { resolve: true })
+    const stat = await host.statFile(root, { resolve: true })
     return R.cleanPath(stat.realPath ?? root)
   } catch {
     return R.cleanPath(root)
@@ -417,9 +417,9 @@ function isInsideRoot(real: string, rootReal: string): boolean {
  * diff of its content either.
  */
 type Untracked = { kind: 'link'; target: string } | { kind: 'file'; size: number; mtimeMs: number } | { kind: 'outside' } | { kind: 'gone' }
-async function untrackedAt($: EngineInterface, abs: string, rootReal: string): Promise<Untracked> {
+async function untrackedAt(host: EngineCalls, abs: string, rootReal: string): Promise<Untracked> {
   try {
-    const stat = await $.fs.stat(abs, { resolve: true })
+    const stat = await host.statFile(abs, { resolve: true })
     if (stat.isLink) return { kind: 'link', target: stat.realPath ?? '' }
     if (stat.realPath === undefined || !isInsideRoot(stat.realPath, rootReal)) return { kind: 'outside' }
     if (stat.kind !== 'file') return { kind: 'gone' }
@@ -446,7 +446,7 @@ let isNodeMissing = false
  * runs of at most 64, so a refresh where nothing changed starts no node. A
  * file the helper could not answer for is left out.
  */
-async function readSafely($: EngineInterface, root: string, wanted: readonly Wanted[], most: number, textMost: number): Promise<Map<string, FB.FileRead>> {
+async function readSafely(host: EngineCalls, root: string, wanted: readonly Wanted[], most: number, textMost: number): Promise<Map<string, FB.FileRead>> {
   const out = new Map<string, FB.FileRead>()
   const fresh: Wanted[] = []
   for (const one of wanted) {
@@ -454,13 +454,13 @@ async function readSafely($: EngineInterface, root: string, wanted: readonly Wan
     if (kept) out.set(one.place, kept)
     else fresh.push(one)
   }
-  const script = `${$.plugin.root.replace(/[\\/]+$/, '')}/web/files.js`
+  const script = `${host.pluginRoot.replace(/[\\/]+$/, '')}/web/files.js`
   for (let i = 0; i < fresh.length; i += FB.MOST_PATHS) {
     const batch = fresh.slice(i, i + FB.MOST_PATHS)
     const paths = batch.map(one => one.place)
     let answer: Map<string, FB.FileRead> | null = null
     try {
-      const ran = await $.process.run(FB.filesArgvOf(script), { stdin: FB.requestTextOf({ root, paths, most, textMost }), timeoutMs: 15_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
+      const ran = await host.runProcess(FB.filesArgvOf(script), { stdin: FB.requestTextOf({ root, paths, most, textMost }), timeoutMs: 15_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
       answer = ran.exitCode === 0 ? FB.answerOf(ran.stdout, paths) : null
       isNodeMissing = false
     } catch (error) {
@@ -487,9 +487,9 @@ type UntrackedRead = Exclude<Untracked, { kind: 'file' }> | FB.FileRead
  * past `most` bytes as `big`, and each plain file read safely (`readSafely`),
  * with its text when it is at most `textMost`.
  */
-async function untrackedOf($: EngineInterface, root: string, places: readonly string[], most: number, textMost: number): Promise<Map<string, UntrackedRead>> {
-  const rootReal = await rootRealOf($, root)
-  const found = await Promise.all(places.map(async place => [place, await untrackedAt($, joinPath(root, place), rootReal)] as const))
+async function untrackedOf(host: EngineCalls, root: string, places: readonly string[], most: number, textMost: number): Promise<Map<string, UntrackedRead>> {
+  const rootReal = await rootRealOf(host, root)
+  const found = await Promise.all(places.map(async place => [place, await untrackedAt(host, joinPath(root, place), rootReal)] as const))
   const out = new Map<string, UntrackedRead>()
   const wanted: Wanted[] = []
   for (const [place, one] of found) {
@@ -497,7 +497,7 @@ async function untrackedOf($: EngineInterface, root: string, places: readonly st
     else if (one.size > most) out.set(place, { kind: 'big', size: one.size })
     else wanted.push({ place, abs: joinPath(root, place), size: one.size, mtimeMs: one.mtimeMs })
   }
-  const read = await readSafely($, root, wanted, most, textMost)
+  const read = await readSafely(host, root, wanted, most, textMost)
   for (const one of wanted) out.set(one.place, read.get(one.place) ?? { kind: 'gone' })
   return out
 }
@@ -513,14 +513,14 @@ function lineCountOf(read: UntrackedRead): number | null {
   return read.kind === 'file' ? read.lines : null
 }
 
-export function scheduleGit($: EngineInterface, ms: number, isHeavy = false) {
+export function scheduleGit(host: EngineCalls, ms: number, isHeavy = false) {
   isHeavyQueued ||= isHeavy
   timers.git?.cancel()
-  timers.git = $.clock.after(ms, () => {
+  timers.git = host.after(ms, () => {
     timers.git = undefined
     const heavy = isHeavyQueued
     isHeavyQueued = false
-    void refreshGit($, heavy)
+    void refreshGit(host, heavy)
   })
 }
 
@@ -529,7 +529,7 @@ export function scheduleGit($: EngineInterface, ms: number, isHeavy = false) {
  * newly edited in): branch, uncommitted files with counts, and (when HEAD
  * moved) the log and day totals.
  */
-export async function refreshGit($: EngineInterface, isHeavy = false): Promise<void> {
+export async function refreshGit(host: EngineCalls, isHeavy = false): Promise<void> {
   if (isGitBusy) {
     isGitQueued = true
     isHeavyQueued ||= isHeavy
@@ -538,21 +538,21 @@ export async function refreshGit($: EngineInterface, isHeavy = false): Promise<v
   isGitBusy = true
 
   try {
-    await discoverRepos($)
-    const now = await $.clock.now()
+    await discoverRepos(host)
+    const now = await host.now()
     const root = R.activeRoot(book)
-    if (shownRoot === null || !R.sameRoot(root, shownRoot)) switchRepo($, root)
+    if (shownRoot === null || !R.sameRoot(root, shownRoot)) switchRepo(host, root)
 
     if (!root) {
       git = { ...G.emptyGit(), isRepo: false, checkedAt: now, ...bookFields() }
       return
     }
 
-    const run = (args: readonly string[]) => runGit($, args, 15_000, root)
+    const run = (args: readonly string[]) => runGit(host, args, 15_000, root)
     const [branch, head, status] = await Promise.all([run(G.argv.branch), run(G.argv.head), run(G.argv.status)])
 
     if (!status.ok) {
-      if (!R.sameRoot((await probeRoot($, root)) ?? '', root)) {
+      if (!R.sameRoot((await probeRoot(host, root)) ?? '', root)) {
         // gone: follow the work to another repository, if any
         R.dropRepo(book, root)
         isGitQueued = true
@@ -567,7 +567,7 @@ export async function refreshGit($: EngineInterface, isHeavy = false): Promise<v
     const untracked = new Map<string, number>()
     // read once for both: the line counts, and while the web deck is on the text its diffs show (`readGitDiffs` then finds it kept)
     const reads = await untrackedOf(
-      $,
+      host,
       root,
       rows.filter(row => row.x === '?').slice(0, 30).map(row => row.path),
       1_000_000,
@@ -612,18 +612,18 @@ export async function refreshGit($: EngineInterface, isHeavy = false): Promise<v
     }
 
     git = next
-    if (currentView().file && currentView().v2.tab === 'changes') void loadFileDiff($, currentView().file)
+    if (currentView().file && currentView().v2.tab === 'changes') void loadFileDiff(host, currentView().file)
   } finally {
     isGitBusy = false
-    savePin($)
-    lastGitAt = await $.clock.now()
-    redrawIfChanged($, lastGitAt)
+    savePin(host)
+    lastGitAt = await host.now()
+    host.redrawIfChanged(lastGitAt)
     if (isGitQueued) {
       isGitQueued = false
-      scheduleGit($, 300)
+      scheduleGit(host, 300)
     }
   }
-  void readGitDiffs($)
+  void readGitDiffs(host)
 }
 
 /** The most untracked files whose whole text one read of git's diffs takes. */
@@ -639,7 +639,7 @@ const gitDiffRead = { isBusy: false, isQueued: false }
  * one past `W.GIT_DIFF_MOST`, has none. Kept (and the state redrawn) only
  * when one changed, and only for the repository the deck still shows.
  */
-export async function readGitDiffs($: EngineInterface): Promise<void> {
+export async function readGitDiffs(host: EngineCalls): Promise<void> {
   if (!isSharing() || git.isRepo !== true || git.root === '') {
     if (gitDiffs.size > 0) gitDiffs = new Map()
     return
@@ -658,7 +658,7 @@ export async function readGitDiffs($: EngineInterface): Promise<void> {
     }
     const tracked = files.filter(file => !file.isUntracked)
     if (tracked.length > 0) {
-      const ran = await runGit($, G.argv.fileDiff(head ? 'HEAD' : G.EMPTY_TREE, []), 20_000, root)
+      const ran = await runGit(host, G.argv.fileDiff(head ? 'HEAD' : G.EMPTY_TREE, []), 20_000, root)
       if (ran.ok) {
         for (const one of filePatchesOf(ran.out)) {
           const row = tracked.find(file => file.path === one.path)
@@ -667,7 +667,7 @@ export async function readGitDiffs($: EngineInterface): Promise<void> {
       }
     }
     const places = files.filter(one => one.isUntracked).slice(0, GIT_DIFF_UNTRACKED).map(one => one.path)
-    for (const [place, read] of await untrackedOf($, root, places, W.GIT_DIFF_MOST, W.GIT_DIFF_MOST)) {
+    for (const [place, read] of await untrackedOf(host, root, places, W.GIT_DIFF_MOST, W.GIT_DIFF_MOST)) {
       // a link shows as its target's path (git's own diff of one); its content, and a file outside the repository, are never read; one that cannot be read has no diff
       if (read.kind === 'link') keep(place, linkHunks(read.target))
       else if (read.kind === 'file' && read.text !== undefined) keep(place, addedFileHunks(read.text))
@@ -677,22 +677,22 @@ export async function readGitDiffs($: EngineInterface): Promise<void> {
     const isSame = next.size === gitDiffs.size && [...next].every(([path, one]) => gitDiffs.get(path)?.id === one.id)
     if (isSame) return
     gitDiffs = next
-    redrawIfChanged($, await $.clock.now())
+    host.redrawIfChanged(await host.now())
   } catch {
     // the diffs stand as they were
   } finally {
     gitDiffRead.isBusy = false
     if (gitDiffRead.isQueued) {
       gitDiffRead.isQueued = false
-      void readGitDiffs($)
+      void readGitDiffs(host)
     }
   }
 }
 
-export async function loadFileDiff($: EngineInterface, path: string): Promise<void> {
+export async function loadFileDiff(host: EngineCalls, path: string): Promise<void> {
   const { root, head } = git
   const row = git.files.find(file => file.path === path)
-  const now = await $.clock.now()
+  const now = await host.now()
   let found: G.FileDiff
 
   if (!row) {
@@ -700,7 +700,7 @@ export async function loadFileDiff($: EngineInterface, path: string): Promise<vo
   } else if (row.isUntracked) {
     let read: UntrackedRead = { kind: 'gone' }
     try {
-      read = (await untrackedOf($, root, [path], 2_000_000, 2_000_000)).get(path) ?? read
+      read = (await untrackedOf(host, root, [path], 2_000_000, 2_000_000)).get(path) ?? read
     } catch {
       // a file that cannot be read says so
     }
@@ -720,7 +720,7 @@ export async function loadFileDiff($: EngineInterface, path: string): Promise<vo
     }
   } else {
     const paths = row.oldPath ? [row.oldPath, path] : [path]
-    const ran = await runGit($, G.argv.fileDiff(head ? 'HEAD' : G.EMPTY_TREE, paths), 15_000, root)
+    const ran = await runGit(host, G.argv.fileDiff(head ? 'HEAD' : G.EMPTY_TREE, paths), 15_000, root)
     found = {
       path,
       hunks: hunksOf(ran.out),
@@ -734,7 +734,7 @@ export async function loadFileDiff($: EngineInterface, path: string): Promise<vo
   if (!R.sameRoot(root, git.root)) return
   const isSame = fileDiff !== null && sameFileDiff(fileDiff, found)
   fileDiff = found
-  if (!isSame) redraw($)
+  if (!isSame) host.redraw()
 }
 
 /** Whether two reads of a file's diff show the same; when each was read does not count. */
@@ -742,20 +742,20 @@ function sameFileDiff(a: G.FileDiff, b: G.FileDiff): boolean {
   return a.path === b.path && a.isBinary === b.isBinary && a.note === b.note && JSON.stringify(a.hunks) === JSON.stringify(b.hunks)
 }
 
-export async function loadCommit($: EngineInterface, hash: string): Promise<void> {
+export async function loadCommit(host: EngineCalls, hash: string): Promise<void> {
   const root = git.root
   // git is handed a commit's name as git printed it, never anything it could read as an option
   if (!G.isHash(hash)) return
   const [meta, numstat, patch] = await Promise.all([
-    runGit($, G.argv.showMeta(hash), 15_000, root),
-    runGit($, G.argv.showNumstat(hash), 15_000, root),
-    runGit($, G.argv.showPatch(hash), 30_000, root),
+    runGit(host, G.argv.showMeta(hash), 15_000, root),
+    runGit(host, G.argv.showNumstat(hash), 15_000, root),
+    runGit(host, G.argv.showPatch(hash), 30_000, root),
   ])
 
   if (currentView().commit !== hash || !R.sameRoot(root, git.root)) return
   if (!meta.ok) {
     commit = null
-    $.ui.toast(`Could not read commit ${hash.slice(0, 7)}`)
+    host.toast(`Could not read commit ${hash.slice(0, 7)}`)
     return
   }
 
@@ -767,5 +767,5 @@ export async function loadCommit($: EngineInterface, hash: string): Promise<void
     patch: patch.out.slice(0, cap),
     isPatchCut: patch.out.length > cap,
   }
-  redraw($)
+  host.redraw()
 }
