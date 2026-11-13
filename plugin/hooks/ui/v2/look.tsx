@@ -37,7 +37,14 @@ export function advanceOf(kit: Kit): Advance {
 export const AVATAR = { row: 18, page: 32, card: 22, list: 20 } as const
 
 /** Who an avatar draws: an agent's row as the state gives it (its own TodoWrite list fills a progress ring). */
-export type Face = Pick<V2AgentRow, 'id' | 'title' | 'kind' | 'status' | 'isStopped'> & { todos?: V2AgentRow['todos'] }
+export type Face = {
+  id: V2AgentRow['id']
+  title: V2AgentRow['title']
+  kind: V2AgentRow['kind']
+  status: V2AgentRow['status']
+  isStopped?: V2AgentRow['isStopped']
+  todos?: V2AgentRow['todos']
+}
 
 /** The style `kit` draws avatars in: the deck's setting, else the library's default (blocks). */
 export function avatarStyleOf(kit: Kit): AV.AvatarStyle {

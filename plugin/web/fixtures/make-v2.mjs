@@ -1,9 +1,9 @@
-// Builds the v2 sample through the mod's own builder: tests/v2session.ts (a
+// Builds the v2 sample through the mod's own builder: tests/mod/v2session.ts (a
 // session recorded through hooks/model.ts's recorders) into hooks/web.ts's
 // deckStateOf, written as web/fixtures/state.v2.json, with its lazy files
 // beside it as a session's folder holds them: web/fixtures/v2/agents/<id>.json,
 // v2/patches/<id>.diff, v2/messages/<id>.md and v2/gitdiffs/<id>.diff. Also
-// every session on the sample's machine (tests/v2sessions.ts, All sessions):
+// every session on the sample's machine (tests/mod/v2sessions.ts, All sessions):
 // web/fixtures/sessions.v2.json, the registry's files, and each other
 // session's deck under web/fixtures/sessions/<id>/ (state.json, agents/).
 //
@@ -32,8 +32,8 @@ register(`data:text/javascript,${encodeURIComponent(HOOKS)}`)
 const here = path.dirname(fileURLToPath(import.meta.url))
 // the mod's folder (plugin/ in the repository)
 const mod = path.resolve(here, '..', '..')
-const { v2Session } = await import(pathToFileURL(path.join(mod, 'tests', 'v2session.ts')).href)
-const { sampleSessions } = await import(pathToFileURL(path.join(mod, 'tests', 'v2sessions.ts')).href)
+const { v2Session } = await import(pathToFileURL(path.join(mod, '..', 'tests', 'mod', 'v2session.ts')).href)
+const { sampleSessions } = await import(pathToFileURL(path.join(mod, '..', 'tests', 'mod', 'v2sessions.ts')).href)
 const W = await import(pathToFileURL(path.join(mod, 'hooks', 'web.ts')).href)
 const T = await import(pathToFileURL(path.join(mod, 'hooks', 'timeline.ts')).href)
 
