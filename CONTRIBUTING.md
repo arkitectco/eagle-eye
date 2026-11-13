@@ -18,7 +18,7 @@ Only one plugin of a name loads. If you installed Eagle Eye from its marketplace
 
 ## Where the files live
 
-The mod is the `plugin/` folder, and an install copies that folder alone: its manifest (`plugin/.claude-plugin/plugin.json`) and icon (`plugin/assets/icon.png`), the code in `plugin/hooks/` and `plugin/web/`, the types in `plugin/types/`, and the kit's tests in `plugin/tests/`. Those tests sit inside the mod because `claude plugin test` loads the mod from the folder it is given and runs only the test files under it. The repository's top holds the rest: the marketplace (`.claude-plugin/marketplace.json`), the docs and the README's images (`assets/`), `scripts/`, CI, and the tests Node runs (`tests/web/` and `tests/gitpoc.test.mjs`).
+An install copies the `plugin/` folder. The mod tests live in `tests/mod/`, and `scripts/test.sh` stages them beside a copy of the plugin for Claude Code’s test runner. Node runs the web and Git tests in `tests/web/` and `tests/gitpoc.test.mjs`.
 
 ## Where to look in the code
 
@@ -35,7 +35,7 @@ Data flows one way. Claude Code's events go into one model of the session, that 
 - The web server: `hooks/webServer.ts` starts and watches `web/server.js` (`superviseWeb`, `writeWeb`), opens the page and holds what the Browser pane's page sends in your voice (as `hooks/hold.ts` says), and `register.tsx` runs the page's commands (`runCommand`). `web/open.js` opens your own browser, and `web/home.js` keeps the home folders private.
 - The registry of sessions: `hooks/registry.ts` (live) and `hooks/sessions.ts` (pure) write and read `sessions/<id>.json` and the inboxes, sealed by `hooks/seal.ts`.
 
-Which tests cover what (each `plugin/tests/<name>.test.ts`):
+Which tests cover what (each `tests/mod/<name>.test.ts`):
 
 - The model: `model`, `data`, `engine`, `live`, `scenario`, `words`, `clean`, `recover`, `questions`, `talk`, `background`, `clear`, `outside`.
 - `deckStateOf` and the view model: `v2`, `inspect`, `timeline`.
@@ -44,7 +44,7 @@ Which tests cover what (each `plugin/tests/<name>.test.ts`):
 - The web deck: `web`, `hold`, `debug`, and `tests/web/` for the server, the page and the Node scripts.
 - Other sessions: `sessions`, `seal`.
 
-The shared fakes are `plugin/tests/world.ts`, which answers the engine's calls for a live deck, and `plugin/tests/v2session.ts`, a sample session's data. `web/fixtures/` is the sample the web page and `/eagle-eye demo` show, built by `web/fixtures/make-v2.mjs` from the mod's own code.
+The shared fakes are `tests/mod/world.ts`, which answers the engine's calls for a live deck, and `tests/mod/v2session.ts`, a sample session's data. `web/fixtures/` is the sample the web page and `/eagle-eye demo` show, built by `web/fixtures/make-v2.mjs` from the mod's own code.
 
 ## Before you open a pull request
 
@@ -60,7 +60,7 @@ node plugin/web/fixtures/make-v2.mjs --check            # the sample data is cur
 ```
 
 - The sample data in `plugin/web/fixtures/` is built by the mod's own code. When a change alters what the deck shows, run `node plugin/web/fixtures/make-v2.mjs` to write it again, and commit the result with the change.
-- `scripts/test.sh` runs the mod's tests one file at a time and prints a summary, as CI does. `claude plugin test plugin` runs every file at once, and on a busy machine a test can run past the 5 seconds the kit gives it. Name files to run only those (`scripts/test.sh web.test.ts`), and set `CLAUDE` to try another Claude Code. It needs bash: macOS, Linux, or Git Bash on Windows.
+- `scripts/test.sh` runs the mod's tests one file at a time and prints a summary, as CI does. Name files to run only those (`scripts/test.sh web.test.ts`), and set `CLAUDE` to try another Claude Code. It needs bash: macOS, Linux, or Git Bash on Windows.
 - CI runs the checks on Ubuntu, macOS and Windows. A test of a path only Windows spells, with a drive letter or an 8.3 short name, runs on Windows alone, and its twin with POSIX paths runs on the others.
 - `scripts/typecheck.sh` type-checks the mod with `tsc`, as CI does on Ubuntu and macOS. It checks against the types Claude Code writes to `plugin/.claude-plugin/types/` when it loads the mod in an interactive session. When there are none yet, or with `--fresh`, it starts a short signed-out session to write them, with no prompt typed.
 - `node plugin/web/dev.js` serves the dashboard on the sample data and prints a link (each link opens one page; it prints the next). `--pane` gives the Browser pane's kind of link, whose messages wait until you press Enter in its terminal, as they wait for Send above the prompt.

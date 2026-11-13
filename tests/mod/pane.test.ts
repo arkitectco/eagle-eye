@@ -1,0 +1,453 @@
+/**
+ * The deck's pane on the v2 view model, on the terminal and the desktop:
+ * the header, the tabs and every key as a Button's hotkey; Now (Needs you,
+ * the agents' cards, the figures, the plan from every source Claude used,
+ * Recent activity and Files, each section folding by its head; more of it
+ * in tests/now.test.ts);
+ * an agent's page and Back; Changes; Inspect and help; and the band's one
+ * line (Chat's own tests are in tests/chat.test.ts). Drawn by the deck
+ * itself (`/eagle-eye demo` over the v2 sample, `/eagle-eye` over a live session),
+ * or a piece by itself (`probe`).
+ */
+import type { On } from 'claude-code'
+import { expect, mock, test, type Engine } from 'claude-code/testing'
+
+import * as M from '../../plugin/hooks/model'
+
+import { KEYS_TEXT } from '../../plugin/hooks/ui/v2/deck'
+import * as W from '../../plugin/hooks/web'
+import { IDS, SAMPLE_NOW, v2Session } from './v2session'
+import { deck, newWorld, NOW, work, world, type World } from './world'
+
+const SURFACES = ['terminal', 'desktop'] as const
+type Surface = 'terminal' | 'desktop' | 'vscode' | 'mobile'
+
+/** The deck's pane as a surface lays it out, `bodyColumns` across. */
+function pane<S extends Surface>(surface: S, bodyColumns = 84, requestId = 'eagle-eye') {
+  return {
+    plugin: 'eagle-eye',
+    surface,
+    component: 'Pane' as const,
+    requestId,
+    viewport: { columns: bodyColumns + 4, rows: 400, isFullscreen: true },
+    props: { title: 'Eagle Eye', isFocused: true, bodyColumns, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 400 }, view: {} },
+  }
+}
+
+type Drawing = { press: (target: { key: string }) => Promise<unknown>; redraw: () => Promise<void> }
+
+/** A press, then the drawing as the pane draws it next. */
+async function press(ui: Drawing, key: string) {
+  await ui.press({ key })
+  await ui.redraw()
+}
+
+/** The v2 sample as `/eagle-eye demo` reads it: the sample session's state and its agent files, patches and cut messages. */
+function sample(on: On) {
+  const session = v2Session()
+  const v2 = W.deckStateOf(session.data, session.git, session.usage, session.now, session.sessionId, session.cwd, session.answerable)
+  const v1 = W.webStateOf(session.data, M.defaultView(), session.git, session.usage, session.now, session.sessionId, session.cwd)
+  const agentFiles = new Map(W.agentFilesOf(session.data).map(one => [one.id, one.text]))
+  const patches = new Map(session.data.edits.map(edit => [W.webIdOf(edit.id), edit.patch]))
+  on('fs.read', ($, e) => {
+    const path = e.path.replace(/\\/g, '/')
+    if (path.endsWith('/web/fixtures/state.json')) return { value: JSON.stringify(v1) }
+    if (path.endsWith('/web/fixtures/state.v2.json')) return { value: JSON.stringify(v2) }
+    const agent = /\/web\/fixtures\/v2\/agents\/([^/]+)\.json$/.exec(path)?.[1]
+    if (agent && agentFiles.has(agent)) return { value: agentFiles.get(agent)! }
+    const patch = /\/web\/fixtures\/v2\/patches\/([^/]+)\.diff$/.exec(path)?.[1]
+    if (patch && patches.has(patch)) return { value: patches.get(patch)! }
+    if (/\/web\/fixtures\/v2\/messages\//.test(path)) return { value: 'The whole answer.\n\n- **researcher** mapped the routes.\n' }
+    return { deny: 'no such file' }
+  })
+  return v2
+}
+
+/** The engine, the v2 sample read, and `/eagle-eye demo` shown. */
+async function demo($: Engine, on: On, w: World = newWorld()) {
+  const clock = mock.clock(on, { now: SAMPLE_NOW + 3_600_000 })
+  const v2 = sample(on)
+  on('ui.focus', () => ({}))
+  world(on, w)
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  await $.command.run(deck('demo'))
+  await clock.advance(1000)
+  return { clock, v2, w }
+}
+
+/** The Button keys a drawing holds, in document order, that start with `prefix`. */
+async function keysOf(ui: { findAll: (q: { type: 'Button' }) => Promise<{ key?: string }[]> }, prefix: string): Promise<string[]> {
+  return (await ui.findAll({ type: 'Button' })).map(button => button.key ?? '').filter(key => key.startsWith(prefix))
+}
+
+test('the deck registers /eagle-eye, the command its run hook answers', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const w = newWorld()
+  world(on, w)
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  await clock.advance(1000)
+  expect(w.commands).toEqual([deck('').command])
+})
+
+test('/eagle-eye is registered before session.start reads anything, so the menu has it from the start and through a reload; its hint leaves out the unlisted probe', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  // what the deck had registered when it first looked for its debug folder and read the person's prefs
+  const atDebug: string[][] = []
+  const atPrefs: string[][] = []
+  class Store extends Map<string, unknown> {
+    override get(key: string) {
+      if (key === 'prefs') atPrefs.push([...w.commands])
+      return super.get(key)
+    }
+  }
+  const w = newWorld({ store: new Store() })
+  Object.defineProperty(w, 'isDebug', {
+    get: () => {
+      atDebug.push([...w.commands])
+      return false
+    },
+  })
+  world(on, w)
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  await clock.advance(1000)
+  expect(atDebug[0]).toEqual(['eagle-eye'])
+  expect(atPrefs[0]).toEqual(['eagle-eye'])
+
+  // a reload runs session.start again: /eagle-eye is registered again first
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  await clock.advance(1000)
+  expect(w.commands).toEqual(['eagle-eye', 'eagle-eye'])
+  expect(atPrefs[1]).toEqual(['eagle-eye', 'eagle-eye'])
+
+  const spec = w.registered[0]
+  expect(spec?.immediate).toBe(true)
+  expect(spec?.argumentHint).toBe('[dashboard|chat|org|changes|inspect|settings|demo|web|web stop|clear|clear show|band|avatars [style]|close]')
+  expect(spec?.argumentHint).not.toContain('probe')
+  // the probe still opens, typed in full
+  await $.command.run(deck('probe'))
+  expect(w.opens.map(one => one.id)).toContain('eagle-eye-probe')
+})
+
+test('the Dashboard: the header says the state, your request and model · mode · context · $ (the mode lit), and holds one key, Open in browser`s `o`; the tabs are Buttons with their digits as hotkeys, and nothing else has one', async ($, on) => {
+  const { v2 } = await demo($, on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(pane(surface))
+    const header = await ui.find({ key: 'deck:header' })
+    expect(header?.text).toContain('Waiting on you')
+    expect(header?.text).toContain('Also exempt /health and /metrics from the limiter.')
+    expect(header?.text).toContain(v2.header.line)
+    expect(v2.header.line).toBe('opus-5.5 · auto mode · context 41% · ≈$4.12')
+    // the permission mode in amber, as Claude Code's footer lights it
+    expect((await ui.findAll({ type: 'Text' })).some(one => one.props.color === '#fbbf24' && one.text === 'auto mode')).toBe(true)
+    // the tabs: 1 Dashboard · 2 Chat · 3 Org · 4 Changes · 5 Inspect · 6 Settings, the Dashboard (`now`) lit; Changes counts git's files
+    expect((await ui.find({ key: 'tab:now' }))?.props).toMatchObject({ label: 'Dashboard', hotkey: '1', plain: true, dimColor: false })
+    expect((await ui.find({ key: 'tab:chat' }))?.props).toMatchObject({ label: 'Chat', hotkey: '2', dimColor: true })
+    expect((await ui.find({ key: 'tab:org' }))?.props).toMatchObject({ label: 'Org', hotkey: '3', dimColor: true })
+    expect((await ui.find({ key: 'tab:changes' }))?.props).toMatchObject({ label: `Changes ${v2.changes.files.length}`, hotkey: '4' })
+    expect((await ui.find({ key: 'tab:inspect' }))?.props).toMatchObject({ label: 'Inspect', hotkey: '5', dimColor: true })
+    expect((await ui.find({ key: 'tab:settings' }))?.props).toMatchObject({ label: 'Settings', hotkey: '6', dimColor: true })
+    // the tabs and Open in browser alone have hotkeys (on a desktop its `o` sits on a Button out of sight): no Message, ↓, ↑, Help or Next need
+    const hotkeys = Object.fromEntries((await ui.findAll({ type: 'Button' })).filter(one => one.props.hotkey !== undefined).map(one => [one.props.hotkey, one.key]))
+    expect(hotkeys).toEqual({ '1': 'tab:now', '2': 'tab:chat', '3': 'tab:org', '4': 'tab:changes', '5': 'tab:inspect', '6': 'tab:settings', o: surface === 'desktop' ? 'key:o' : 'deck:browser' })
+    for (const key of ['key:n', 'key:i', 'key:h', 'key:m', 'key:j', 'key:k']) expect(await ui.find({ key })).toBeUndefined()
+    expect(header?.text ?? '').not.toMatch(/Inspect|Help|Next need/)
+    // the Dashboard: a card an agent, the figures
+    expect(await ui.find({ key: 'card:main' })).toBeDefined()
+    expect(await ui.find({ key: 'tile:running' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('the terminal, while the pane does not hold the keyboard: a line under the tabs says the keys go to the prompt and how to give them to the pane (ctrl+x tab, twice past a band); none while it holds them, none on a desktop', async ($, on) => {
+  await demo($, on)
+  const keyless = (surface: 'terminal' | 'desktop') => {
+    const one = pane(surface)
+    return { ...one, props: { ...one.props, isFocused: false } }
+  }
+  const away = await $.ui.mount(keyless('terminal'))
+  const line = await away.find({ key: 'deck:keys' })
+  expect(line?.text).toBe(KEYS_TEXT)
+  expect(line?.text).toContain('ctrl+x then tab')
+  expect(line?.text).toContain('o')
+  // the keys themselves are as ever: the line tells how to reach them
+  expect((await away.find({ key: 'tab:chat' }))?.props.hotkey).toBe('2')
+  expect((await away.find({ key: 'deck:browser' }))?.props.hotkey).toBe('o')
+  await away.unmount()
+  const held = await $.ui.mount(pane('terminal'))
+  expect(await held.find({ key: 'deck:keys' })).toBeUndefined()
+  await held.unmount()
+  const desktop = await $.ui.mount(keyless('desktop'))
+  expect(await desktop.find({ key: 'deck:keys' })).toBeUndefined()
+  await desktop.unmount()
+})
+
+test('Now: Needs you as Claude Code holds them (a question answerable here, a permission with its command, a notification verbatim, each its age), a card an agent, the plan from every source', async ($, on) => {
+  const { v2 } = await demo($, on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(pane(surface))
+    // each need's title a Button keyed as `j`, `k` and `n` move to (W.needKeyOf), in the state's order
+    expect(await keysOf(ui, 'need:')).toEqual(v2.needs.map(need => W.needKeyOf(need.id)))
+    const ask = await ui.find({ key: 'needs:toolu_01AskOne' })
+    expect(ask?.text).toContain('Orchestrator asks you')
+    expect(ask?.text).toContain('Which store should back the limiter in production?')
+    expect(ask?.text).toContain('3m')
+    expect((await ui.find({ key: 'answer:toolu_01AskOne:0:0' }))?.props.label).toBe('Redis')
+    expect(await ui.find({ key: 'other:toolu_01AskOne:0' })).toBeDefined()
+    // a multi-select one toggles and sends with Submit
+    expect((await ui.find({ key: 'answer:toolu_01AskMany:0:1' }))?.props.label).toBe('☐ /metrics')
+    expect((await ui.find({ key: 'answer:toolu_01AskMany' }))?.props.label).toBe('Submit')
+    // a permission: its tool, its exact command, what it does, and where to answer it
+    const permit = await ui.find({ key: 'needs:toolu_01BldB2' })
+    expect(permit?.text).toContain('builder needs your OK · Bash')
+    expect((await ui.find({ type: 'Code', text: 'npm test -- rateLimit' })) ?? null).not.toBeNull()
+    expect(permit?.text).toContain('Run the limiter tests')
+    expect(permit?.text).toContain('Answer it in Claude Code.')
+    // Claude Code's notification, as it sent it
+    const note = v2.needs.find(need => need.kind === 'notification')!
+    expect((await ui.find({ key: `needs:${note.id}` }))?.text).toContain('The github MCP server is asking for your input')
+
+    // the agents: a card each, the Orchestrator first and then those at work as they started; each name keyed as `j` and `k` move to (W.agentKeyOf)
+    const rows = v2.agents.filter((row): row is W.V2AgentRow => row.row === 'agent').sort((x, y) => Number(y.id === 'main') - Number(x.id === 'main') || x.startedAt - y.startedAt)
+    const front = rows.filter(row => !W.isFinishedRow(row))
+    const behind = rows.filter(row => W.isFinishedRow(row))
+    // the finished (done, failed, stopped or idle) behind one "N finished ▸" row, Clear finished beside it; opened, their cards after
+    const fold = await ui.find({ key: 'finished:now:fold' })
+    if (String(fold?.props.label).endsWith('▾')) await press(ui, 'finished:now:fold')
+    expect(await keysOf(ui, 'agent:')).toEqual(front.map(row => W.agentKeyOf(row.id)))
+    expect((await ui.find({ key: 'finished:now:fold' }))?.props).toMatchObject({ label: `${behind.length} finished ▸`, plain: true })
+    expect((await ui.find({ key: 'finished:now:clear' }))?.props).toMatchObject({ label: 'Clear finished', plain: true })
+    expect(await ui.find({ key: 'finished:now:show' })).toBeUndefined()
+    await press(ui, 'finished:now:fold')
+    const cards = [...front, ...behind]
+    expect(await keysOf(ui, 'agent:')).toEqual(cards.map(row => W.agentKeyOf(row.id)))
+    expect((await ui.find({ key: 'finished:now:fold' }))?.props.label).toBe(`${behind.length} finished ▾`)
+    expect(await keysOf(ui, 'fold:')).toEqual(['fold:dash:agents', 'fold:dash:background', 'fold:dash:figures', 'fold:dash:plan', 'fold:dash:activity', 'fold:dash:files'])
+    const builder = await ui.find({ key: `card:${IDS.builder}` })
+    expect(builder?.text).toContain('Bash npm test -- rateLimit')
+    expect(builder?.text).toContain('Waiting · 29m')
+    // avatars: the gradient face with its status dot where Svg draws, the cards' first; none on the terminal
+    const faces = (await ui.findAll({ type: 'Svg' })).filter(svg => String(svg.props.alt).endsWith('avatar'))
+    if (surface === 'desktop') expect(faces.slice(0, cards.length).map(face => face.props.alt)).toEqual(cards.map(row => `${row.title}'s avatar`))
+    else expect(faces).toEqual([])
+
+    // the plan: the board, the Orchestrator's own list, the approved plan folded to its first line, the Workflow's phases
+    const plan = await ui.find({ key: 'now:plan' })
+    expect(plan?.text).toContain('Task board')
+    expect(plan?.text).toContain('Writing the limiter')
+    expect(plan?.text).toContain('Orchestrator’s todos')
+    expect(plan?.text).toContain('Rate limiting for the public API')
+    expect(plan?.text).toContain('Lint → Unit tests → Package')
+    expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+    await press(ui, 'plan:approved')
+    expect((await ui.find({ type: 'Markdown' }))?.text).toContain('1. **Map the routes.**')
+    await press(ui, 'plan:approved')
+    await ui.unmount()
+  }
+})
+
+test('a section`s head folds it to one line (and it stays so), another press opens it; an agent`s card opens its page, and b goes back', async ($, on) => {
+  const { v2 } = await demo($, on)
+  const n = v2.agents.filter(row => row.row === 'agent').length
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(pane(surface))
+    await press(ui, 'fold:dash:agents')
+    expect((await ui.find({ key: 'fold:dash:agents' }))?.props.label).toBe(`▸ AGENTS ${n}`)
+    expect(await ui.find({ key: `agent:${IDS.scout}` })).toBeUndefined()
+    await ui.redraw()
+    expect(await ui.find({ key: `agent:${IDS.scout}` })).toBeUndefined()
+    await press(ui, 'fold:dash:agents')
+    expect((await ui.find({ key: 'fold:dash:agents' }))?.props.label).toBe(`▾ AGENTS ${n}`)
+    // scout stopped: behind the finished row
+    if (String((await ui.find({ key: 'finished:now:fold' }))?.props.label).endsWith('▸')) await press(ui, 'finished:now:fold')
+    expect((await ui.find({ key: `card:${IDS.scout}` }))?.text).toContain('Stopped')
+
+    // builder's page, as the web's drawer: who it is (Back at its head's right), its facts, Message and Chat with, its live call, what it waits on you for, its task; Activity and Edits open
+    await press(ui, `agent:${IDS.builder}`)
+    expect((await ui.find({ key: 'key:b' }))?.props).toMatchObject({ hotkey: 'b', label: '← Back' })
+    const head = await ui.find({ key: 'page:head' })
+    expect(head?.text).toContain('builder')
+    expect(head?.text).toContain('general-purpose · sonnet-4.5 · background')
+    expect(head?.text).toContain('started by')
+    expect((await ui.find({ key: 'page:facts' }))?.text).toMatch(/waiting on you.*started by.*Orchestrator.*513k tokens.*b81c6f3/s)
+    expect((await ui.find({ key: 'page:message' }))?.props).toMatchObject({ label: 'Message', plain: true })
+    expect((await ui.find({ key: 'page:chatwith' }))?.props.label).toMatch(/Chat with builder$/)
+    expect((await ui.find({ key: 'page:live' }))?.text).toContain('Bash npm test -- rateLimit')
+    expect(await keysOf(ui, 'need:')).toEqual(['need:toolu_01BldB2'])
+    expect((await ui.find({ key: 'page:task' }))?.text).toContain('Write a sliding-window rate limiter')
+    expect((await ui.find({ key: 'page:fold:activity' }))?.props.label).toBe('▾ ACTIVITY')
+    expect((await ui.find({ key: 'page:activity' }))?.text).toContain('5 tool calls')
+    // its calls newest first, each a press that opens it
+    expect(await keysOf(ui, 'page:act:')).toEqual(['toolu_01BldB2', 'toolu_01BldW2', 'toolu_01BldB1', 'toolu_01BldE1', 'toolu_01BldW1'].map(id => `page:act:${id}`))
+    expect((await ui.find({ key: 'page:fold:edits' }))?.props.label).toBe('▾ EDITS')
+    // its edits a file a row, the one edited last first and open on its diff
+    expect(await keysOf(ui, 'page:edits:')).toEqual(['C:\\Users\\sam\\AppData\\Local\\Temp\\bench.js', 'src/app.ts', 'src/rateLimit.ts'].map(path => `page:edits:${path}`))
+    expect((await ui.find({ key: 'edit:toolu_01BldW2' }))?.text).toContain('10,000 hits against the in-memory store')
+    if (surface === 'terminal') expect((await ui.findAll({ type: 'Code' })).some(code => code.props.format === 'diff')).toBe(true)
+    // the composer at its foot: its words to builder by SendMessage
+    expect((await ui.find({ type: 'Input' }))?.props).toMatchObject({ placeholder: 'Message builder…', submitLabel: 'Send' })
+    expect((await ui.find({ key: 'page:compose' }))?.text).toContain('→ builder via SendMessage')
+    // a head folds its part; another press opens it again
+    await press(ui, 'page:fold:activity')
+    expect((await ui.find({ key: 'page:fold:activity' }))?.props.label).toBe('▸ ACTIVITY')
+    expect(await ui.find({ key: 'page:log' })).toBeUndefined()
+    await press(ui, 'page:fold:activity')
+    expect(await ui.find({ key: 'page:log' })).toBeDefined()
+    // its parent's name opens the Orchestrator's page; b comes back to Now
+    await press(ui, 'page:parent:main')
+    expect((await ui.find({ key: 'page:head' }))?.text).toContain('Orchestrator')
+    await press(ui, 'key:b')
+    expect(await ui.find({ key: 'page:head' })).toBeUndefined()
+    expect(await ui.find({ key: 'now:agents' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('a question answered from the pane: one press for one answer, toggles and Submit for several; it goes the way the page`s answer goes (in the sample, there alone)', async ($, on) => {
+  const { w } = await demo($, on)
+  const ui = await $.ui.mount(pane('desktop'))
+  await press(ui, 'answer:toolu_01AskOne:0:0')
+  expect(w.toasts).toContain('Sample data: you answered Redis. Nothing was sent to Claude.')
+  expect(await ui.find({ key: 'need:toolu_01AskOne' })).toBeUndefined()
+  // several: each press toggles, Submit sends them; Submit with none picked says so
+  await press(ui, 'answer:toolu_01AskMany')
+  expect((await ui.find({ key: 'needs:toolu_01AskMany' }))?.text).toContain('Pick an answer for Exempt first.')
+  await press(ui, 'answer:toolu_01AskMany:0:0')
+  await press(ui, 'answer:toolu_01AskMany:0:1')
+  expect((await ui.find({ key: 'answer:toolu_01AskMany:0:0' }))?.props.label).toBe('☑ /health')
+  await press(ui, 'answer:toolu_01AskMany')
+  expect(w.toasts).toContain('Sample data: you answered /health, /metrics. Nothing was sent to Claude.')
+  expect(await ui.find({ key: 'need:toolu_01AskMany' })).toBeUndefined()
+  // Chat says how each was answered
+  await press(ui, 'tab:chat')
+  const chat = (await ui.findAll({ type: 'Box' })).filter(box => (box.key ?? '').startsWith('msg:')).map(box => box.text)
+  expect(chat.some(text => text.includes('You answered: Redis'))).toBe(true)
+  await press(ui, 'tab:now')
+  await ui.unmount()
+})
+
+test('Changes: git`s files as Buttons keyed file:<path>, one opened with the agents` own edits of it; the edits outside the repository; the commits', async ($, on) => {
+  const { v2 } = await demo($, on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(pane(surface, 84))
+    await press(ui, 'tab:changes')
+    expect((await ui.find({ key: 'changes:repo' }))?.text).toContain('acme-api ⎇ feat/rate-limit')
+    expect(await keysOf(ui, 'file:')).toEqual(v2.changes.files.map(file => W.fileKeyOf(file.path)))
+    expect((await ui.find({ key: 'filerow:src/app.ts' }))?.text).toContain('builder')
+    await press(ui, 'file:src/app.ts')
+    const open = await ui.find({ key: 'filediff:src/app.ts' })
+    expect(open?.text).toContain('Edit by builder')
+    expect(open?.text).toContain('The sample holds no git diff of its own')
+    expect((await ui.findAll({ type: 'Code' })).some(code => code.props.format === 'diff' && String(code.props.source).includes('rateLimit'))).toBe(true)
+    // the sample sends no review prompt: Review is this session's
+    expect(await ui.find({ key: 'changes:review' })).toBeUndefined()
+    // the edits outside the repository: a row a file, keyed by its path, shut until pressed
+    expect(await keysOf(ui, 'edits:')).toEqual(v2.changes.edits.filter(edit => edit.isOutside).map(edit => `edits:${edit.path}`))
+    expect(await keysOf(ui, 'commit:')).toEqual([`commit:${v2.changes.commits[0]?.hash}`])
+    await press(ui, 'file:src/app.ts')
+    await press(ui, 'tab:now')
+    await ui.unmount()
+  }
+})
+
+test('5 opens Inspect, its sections folded to one line each, and Spend (the context, the spend, the tokens and requests, a row an agent); 6 opens Settings: the avatar style, Open in browser and Help; Chat with <agent> on its page opens Chat with it picked in the member list, no @ typed', async ($, on) => {
+  const { v2 } = await demo($, on)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount(pane(surface))
+    await press(ui, 'tab:inspect')
+    expect((await ui.find({ key: 'tab:inspect' }))?.props.dimColor).toBe(false)
+    expect((await ui.find({ key: 'tab:now' }))?.props.dimColor).toBe(true)
+    // folded, each section its head and its one line
+    expect((await ui.find({ key: 'inspect:spend' }))?.text).toContain(`SPEND· ${v2.inspect.summary.spend}`)
+    expect(await ui.find({ key: 'inspect:tile:context' })).toBeUndefined()
+    await press(ui, 'fold:inspect:spend')
+    // Spend: the figures in tiles, then a row an agent, in the state's order
+    expect((await ui.find({ key: 'inspect:tile:context' }))?.text).toContain('41%')
+    expect((await ui.find({ key: 'inspect:tile:spend' }))?.text).toContain('≈$4.12')
+    expect((await ui.find({ key: 'inspect:tile:spend' }))?.text).toContain('At API prices')
+    expect((await ui.find({ key: 'inspect:spend' }))?.text).toContain('Claude Code’s /cost estimate at API list prices, not a bill on a subscription;')
+    expect((await ui.find({ key: 'inspect:tile:tokens' }))?.text).toContain('Tokens')
+    expect((await ui.find({ key: 'inspect:tile:requests' }))?.text).toContain(String(v2.inspect.agents.reduce((n, one) => n + one.requests, 0)))
+    const builder = (await ui.find({ key: `inspect:${IDS.builder}` }))?.text ?? ''
+    for (const said of ['builder', 'sonnet-4.5', '96k', '14.8k', '402k', '18']) expect(builder).toContain(said)
+    expect(await keysOf(ui, 'inspect:open:')).toEqual(v2.inspect.agents.map(one => `inspect:open:${one.id}`))
+    // the linter's failed call counts in red under Errors
+    expect((await ui.find({ key: 'inspect:head' }))?.text).toContain('Errors')
+
+    // a name in Inspect opens its page
+    await press(ui, `inspect:open:${IDS.builder}`)
+    expect((await ui.find({ key: 'page:head' }))?.text).toContain('builder')
+    await press(ui, 'key:b')
+    expect((await ui.find({ key: 'tab:inspect' }))?.props.dimColor).toBe(false)
+    // 6: Settings holds no Inspect now
+    await press(ui, 'tab:settings')
+    expect((await ui.find({ key: 'tab:settings' }))?.props.dimColor).toBe(false)
+    expect(await ui.find({ key: 'inspect:tile:context' })).toBeUndefined()
+    // the web page: off, Open in browser starts it and opens it in your own browser (as /eagle-eye web); no button for Claude's Browser pane on any surface
+    expect((await ui.find({ key: 'settings:web:open-browser' }))?.props.label).toBe('Open in browser')
+    expect(await ui.find({ key: 'settings:web:open-pane' })).toBeUndefined()
+    expect(JSON.stringify(await ui.drawn())).not.toMatch(/Browser pane|Claude can drive/)
+    expect(await ui.find({ key: 'web:open' })).toBeUndefined()
+    expect(await ui.find({ key: 'settings:web:link' })).toBeUndefined()
+    // Help: each tab, then the keys that are left
+    const help = (await ui.find({ key: 'help' }))?.text ?? ''
+    for (const said of ['1  Dashboard', '2  Chat', '3  Org', '4  Changes', '5  Inspect', '6  Settings', 'pick Everyone or one agent', 'back from an agent’s page', 'opens All sessions']) expect(help).toContain(said)
+    expect(help).not.toMatch(/\bj\b.*down|Inspect: the context/)
+    await press(ui, 'tab:inspect')
+
+    await press(ui, `inspect:open:${IDS.builder}`)
+    await press(ui, 'page:chatwith')
+    expect((await ui.find({ key: 'tab:chat' }))?.props.dimColor).toBe(false)
+    expect(await ui.find({ key: 'page:head' })).toBeUndefined()
+    expect((await ui.find({ key: `chat:filter:${IDS.builder}` }))?.props.dimColor).toBe(false)
+    expect((await ui.find({ type: 'Input' }))?.props.value).toBe('')
+    expect((await ui.find({ type: 'Input' }))?.props.placeholder).toBe('Message builder…')
+    await press(ui, 'chat:filter:all')
+    // Spend folded again for the next surface
+    await press(ui, 'tab:inspect')
+    await press(ui, 'fold:inspect:spend')
+    expect(await ui.find({ key: 'inspect:tile:context' })).toBeUndefined()
+    await press(ui, 'tab:now')
+    await ui.unmount()
+  }
+})
+
+test('the band: one line while an agent is at work or something needs you, its words the state`s, and /eagle-eye opens Now', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const w = newWorld()
+  world(on, w)
+  await work($)
+  await clock.advance(1000)
+  const BAND = { hasSurvey: false, isCollapsed: false, isWorking: true, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} }
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'eagle-eye', surface, component: 'AbovePrompt', props: BAND })
+    expect(JSON.stringify(await ui.drawn())).toContain('1 working')
+    expect((await ui.find({ key: 'band:open' }))?.props).toMatchObject({ label: '/eagle-eye', plain: true })
+    expect((await ui.find({ key: 'band:open' }))?.props.hotkey).toBeUndefined()
+    await ui.unmount()
+  }
+  await $.command.run(deck('chat'))
+  const band = await $.ui.mount({ plugin: 'eagle-eye', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await band.press({ key: 'band:open' })
+  const ui = await $.ui.mount(pane('terminal'))
+  expect((await ui.find({ key: 'tab:now' }))?.props.dimColor).toBe(false)
+  await ui.unmount()
+  await band.unmount()
+})
+
+test('from 120 cells Recent activity and Files stand side by side, the cards four a row at 140; below, one under the other, two cards a row; top to bottom what needs you, the agents, the figures, the plan', async ($, on) => {
+  await demo($, on)
+  for (const surface of SURFACES) {
+    const wide = await $.ui.mount(pane(surface, 140))
+    expect((await wide.find({ key: 'now:lists' }))?.props.flexDirection).toBe('row')
+    expect((await wide.findAll({ type: 'Box' })).filter(box => (box.key ?? '').startsWith('cards:'))[0]?.text).toContain('Orchestrator')
+    await wide.unmount()
+    const narrow = await $.ui.mount(pane(surface, 84))
+    expect((await narrow.find({ key: 'now:lists' }))?.props.flexDirection).toBe('column')
+    const now = (await narrow.find({ key: 'now' }))?.text ?? ''
+    expect(now.indexOf('NEEDS YOU')).toBeLessThan(now.indexOf('AGENTS'))
+    expect(now.indexOf('AGENTS')).toBeLessThan(now.indexOf('FIGURES'))
+    expect(now.indexOf('FIGURES')).toBeLessThan(now.indexOf('PLAN'))
+    expect(now.indexOf('PLAN')).toBeLessThan(now.indexOf('RECENT ACTIVITY'))
+    await narrow.unmount()
+  }
+})

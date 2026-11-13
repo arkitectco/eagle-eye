@@ -26,7 +26,7 @@ import type {
   ToolCallResult,
 } from 'claude-code'
 
-import type { DeckAck, DeckActivity, DeckAgent, DeckData, DeckMessage, DeckStatus, DeckView } from '../types'
+import type { DeckAck, DeckActivity, DeckAgent, DeckData, DeckMessage, DeckStatus, DeckView } from '../types/index.d.ts'
 import * as AV from '../web/avatars.mjs'
 import * as B from './background'
 import { runEagleEye } from './commands'
@@ -1810,8 +1810,7 @@ function kitOf(ui: ReturnType<EngineInterface['ui']['resolve']>, surface: Kit['s
     ...('Select' in ui ? { Select: ui.Select } : {}),
     // the terminal's table answers to Svg but draws nothing for it: there the screens draw text
     ...('Svg' in ui && surface !== 'terminal' ? { Svg: ui.Svg } : {}),
-    // a table answers to every element name: only the terminal and the desktop run a surface module (Org's chart)
-    ...('Client' in ui && (surface === 'terminal' || surface === 'desktop') ? { Client: ui.Client } : {}),
+    hasSurfaceModules: surface === 'desktop' && 'Client' in ui,
   }
 }
 
@@ -2455,22 +2454,21 @@ function probeSvg(count: number): string {
 /**
  * The probe pane, top to bottom: the site's numbers and a hex colour in
  * native Text, the Client, an Svg without `isInteractive`, and the last
- * `ui.message` and `ui.fault` the Client caused. `Client` and `Svg` are
- * passed only where the surface draws them.
+ * `ui.message` and `ui.fault` the Client caused. Draws it on the terminal and
+ * desktop, where Claude Code supports surface modules.
  */
 function probeView(
   ui: ReturnType<EngineInterface['ui']['resolve']>,
   e: RenderInput<'Pane'>,
-  Client: Elements['desktop']['Client'] | undefined,
   Svg: Elements['desktop']['Svg'] | undefined,
 ): RenderElement {
   const { Box, Text } = ui
   const viewport = e.viewport ? `${e.viewport.columns}×${e.viewport.rows}` : 'none'
   const fault = probe.fault
-  let client: RenderElement
-  if (!Client) client = <Text dimColor>{`No Client on ${e.surface}: its element table has none.`}</Text>
+  let client: RenderElement | string | null | undefined
+  if ((e.surface !== 'terminal' && e.surface !== 'desktop') || !('Client' in ui)) client = <Text dimColor>{`No Client on ${e.surface}: its element table has none.`}</Text>
   else if (probe.failedOn.has(e.surface)) client = <Text dimColor>{`The Client is left out here after its fault; /eagle-eye probe twice draws it again.`}</Text>
-  else client = <Client key="probe" module="./ui/probe.client.tsx" width="100%" props={{ tick: probe.tick, cols: e.props.bodyColumns }} />
+  else client = h('Client', { key: 'probe', module: './ui/probe.client.tsx', width: '100%', props: { tick: probe.tick, cols: e.props.bodyColumns } })
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="row" columnGap={2}>
@@ -3281,12 +3279,14 @@ export const register: Register = on => {
 
   // A call the engine puts to the mode's decider: a permission prompt, if its dialog shows (classic.PermissionRequest). Observe only.
   on('tool.check', async ($, e, next) => {
-    const verdict = await next(e)
+    const downstream = next(e)
+    const verdict = await downstream
+    const { decision, reason, rule, hook, setting, plugin } = verdict
     // Inspect's permissions log: every verdict on a real call, as the engine gave it
-    if (await inspectCheck($, data, e, verdict, next.origin.plugin === $.plugin.name, currentGit().root || null)) touched($, await $.clock.now())
+    if (await inspectCheck($, data, e, { decision, reason, rule, hook, setting, plugin }, next.origin.plugin === $.plugin.name, currentGit().root || null)) touched($, await $.clock.now())
     try {
       // the deck's own calls, a query (no call), and the tools whose dialog is the person's own answer (a question, a plan) are no permission prompt
-      const isPrompt = verdict.decision === 'ask' && e.tool_use_id !== undefined && e.tool_use_id !== '' && !PERSON_TOOLS.includes(e.tool) && next.origin.plugin !== $.plugin.name
+      const isPrompt = decision === 'ask' && e.tool_use_id !== undefined && e.tool_use_id !== '' && !PERSON_TOOLS.includes(e.tool) && next.origin.plugin !== $.plugin.name
       if (isPrompt && e.tool_use_id) {
         asks.set(e.tool_use_id, { tool: e.tool, input: e.input, agentId: e.agentId ?? M.MAIN })
         keepAtMost(asks, MOST_KEPT)
@@ -3294,7 +3294,7 @@ export const register: Register = on => {
     } catch {
       // the verdict stands whatever the deck makes of it
     }
-    return verdict
+    return downstream
   })
 
   // The permission dialog shows for a call the engine asked about: it is held on you until the call ends or is denied. Observe only.
@@ -3479,10 +3479,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PROBE }, async ($, e) => {
     const ui = $.ui.resolve(e)
-    // a table answers to every element name (a missing one draws a fragment): the surface says which really draw
-    const Client = (e.surface === 'terminal' || e.surface === 'desktop') && 'Client' in ui ? ui.Client : undefined
     const Svg = e.surface !== 'terminal' && 'Svg' in ui ? ui.Svg : undefined
-    return probeView(ui, e, Client, Svg)
+    return probeView(ui, e, Svg)
   })
 
   // what the probe's Client posts (a click's cell); only this plugin's hooks hear it

@@ -74,7 +74,7 @@ export function chartAgentsOf(state: Pick<WebStateV2, 'agents'>): OrgAgent[] {
 
 /** Whether Org draws the chart's Client here, where the pane's own chart cannot draw: on the desktop, until the Client fails there. */
 export function isClientOn(kit: Kit, org: OrgSpot): boolean {
-  return kit.surface === 'desktop' && kit.Client !== undefined && !org.isDown
+  return kit.surface === 'desktop' && kit.hasSurfaceModules === true && !org.isDown
 }
 
 /** What Org shows beside the state: the view's pick (Chart, or the Timeline) and the lazy files the Timeline comes from. */
@@ -103,7 +103,7 @@ function orgSwitch(kit: Kit, isTimeline: boolean, actions: DashActions): RenderE
 
 /** Org: its head with the Chart · Timeline switch, then the Timeline once picked; else the chart where the pane draws it, else the chart's Client, else the tree. */
 export function orgTab(kit: Kit, whole: WebStateV2, actions: DashActions, org: OrgSpot, shows: OrgShows = {}): RenderElement {
-  const { Box, Client } = kit
+  const { Box } = kit
   const isTimeline = shows.orgView === 'timeline'
   const switcher = orgSwitch(kit, isTimeline, actions)
   if (isTimeline) {
@@ -129,12 +129,12 @@ export function orgTab(kit: Kit, whole: WebStateV2, actions: DashActions, org: O
       </Box>
     )
   }
-  if (Client && isClientOn(kit, org) && agents.length > 0) {
+  if (isClientOn(kit, org) && agents.length > 0) {
     const props = orgPropsOf(agents, org.selected, kit.columns)
     return (
       <Box key="org:tab" flexDirection="column" gap={1}>
         {head}
-        <Client key="org" module="./org.client.tsx" width="100%" height={props.rows} props={props} />
+        {h('Client', { key: 'org', module: './org.client.tsx', width: '100%', height: props.rows, props })}
       </Box>
     )
   }

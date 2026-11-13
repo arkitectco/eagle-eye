@@ -23,8 +23,7 @@ export type Kit = {
   Input?: TerminalTable['Input']
   Select?: TerminalTable['Select']
   Svg?: Elements['desktop']['Svg']
-  /** Where the surface runs a plugin's surface module (the terminal and the desktop): Org's chart. */
-  Client?: Elements['desktop']['Client']
+  hasSurfaceModules?: boolean
   columns: number
   /**
    * The terminal only: the rows the drawing may take (./v2/fit `paneRowsFor`:
