@@ -154,7 +154,7 @@ function engineCalls($: EngineInterface) {
     openPane: () => openPane($),
     loadDemo: (isFresh: boolean) => loadDemo($, isFresh),
     redraw: () => redraw($),
-    save: () => save($),
+    save: () => saveDeckState($),
     redrawIfChanged: (now: number) => redrawIfChanged($, now),
     ack: (id: string, status: DeckAck['status'], text: string) => ack($, id, status, text),
     runCommand: (command: Record<string, unknown>) => runCommand($, command),
@@ -415,6 +415,19 @@ function screenKey(now: number): string {
   return [v2Memo.shows, gitKeyOf(currentGit()), webKey, sample, SR.registryKey()].join('\n\u0001')
 }
 
+/** Keeps the model in `$.state`, so a reload of this module picks it up again; while the debug folder is there, dumps it too, and while the web deck is on, writes its state. */
+function saveDeckState($: EngineInterface) {
+  dataGen += 1
+  scheduleDump($)
+  const engine = engineCalls($)
+  scheduleWeb(engine)
+  if (timers.save) return
+  timers.save = $.clock.after(1500, () => {
+    timers.save = undefined
+    void $.state.set(SNAPSHOT, M.copyOf({ v: M.SNAPSHOT_VERSION, data, view })).catch(() => undefined)
+  })
+}
+
 /**
  * Redraws only when the screen would change: how events, the timer and the
  * background reads draw, so nothing moves while nothing changes. (A press
@@ -425,7 +438,8 @@ function redrawIfChanged($: EngineInterface, now: number) {
   const key = screenKey(now)
   if (key === shownKey) return
   shownKey = key
-  scheduleWeb(engineCalls($))
+  const engine = engineCalls($)
+  scheduleWeb(engine)
   SR.noteChanged(now)
   redraw($)
 }
@@ -443,7 +457,7 @@ function keepThinking(kept: Thinking, chunk: { index: number; text: string }): v
 
 /** An event changed the data: keep it, and draw if the screen would change. Whatever it brought that the deck could stop is put to Claude Code's permission check at once (`probeStops`), so its Stop shows with it. */
 function touched($: EngineInterface, now: number) {
-  save($)
+  saveDeckState($)
   redrawIfChanged($, now)
   probeStops($, now)
 }
@@ -464,7 +478,8 @@ async function readContextSoon($: EngineInterface): Promise<void> {
       }
       return
     }
-    if (await readInspectContext(engineCalls($), data)) touched($, await $.clock.now())
+    const engine = engineCalls($)
+    if (await readInspectContext(engine, data)) touched($, await $.clock.now())
   } catch {
     // Inspect's context is read again at the next measure
   }
@@ -473,8 +488,9 @@ async function readContextSoon($: EngineInterface): Promise<void> {
 /** Inspect: what is loaded (the model, the output style, the settings' hooks), then the context, read now. */
 async function readInspected($: EngineInterface): Promise<void> {
   try {
-    if (await readInspectLoaded(engineCalls($), data)) touched($, await $.clock.now())
-    if (await readInspectContext(engineCalls($), data)) touched($, await $.clock.now())
+    const engine = engineCalls($)
+    if (await readInspectLoaded(engine, data)) touched($, await $.clock.now())
+    if (await readInspectContext(engine, data)) touched($, await $.clock.now())
   } catch {
     // Inspect shows what it had
   }
@@ -668,18 +684,6 @@ function sendTitleOf(from: string, text: string): string {
   const sent = F.oneLine(text)
   const found = sendTitles.find(one => one.from === from && (one.text === text || (F.oneLine(one.text) !== '' && sent.includes(F.oneLine(one.text).slice(0, 80)))))
   return found?.summary ?? ''
-}
-
-/** Keeps the model in `$.state`, so a reload of this module picks it up again; while the debug folder is there, dumps it too, and while the web deck is on, writes its state. */
-function save($: EngineInterface) {
-  dataGen += 1
-  scheduleDump($)
-  scheduleWeb(engineCalls($))
-  if (timers.save) return
-  timers.save = $.clock.after(1500, () => {
-    timers.save = undefined
-    void $.state.set(SNAPSHOT, M.copyOf({ v: M.SNAPSHOT_VERSION, data, view })).catch(() => undefined)
-  })
 }
 
 /**
@@ -1218,7 +1222,7 @@ async function sendChat($: EngineInterface, agentId: string, text: string, ackId
     $.ui.toast(why)
     await ack($, ackId, 'failed', why)
   }
-  save($)
+  saveDeckState($)
   redraw($)
 }
 
@@ -1550,7 +1554,7 @@ async function openPane($: EngineInterface): Promise<boolean> {
 }
 
 function changed($: EngineInterface) {
-  save($)
+  saveDeckState($)
   redraw($)
 }
 
@@ -2424,7 +2428,7 @@ async function attributeCommits($: EngineInterface, agentId: string, before: str
   const keys = Object.keys(data.commitsBy)
   if (keys.length > 300) for (const old of keys.slice(0, keys.length - 300)) delete data.commitsBy[old]
   if (fresh.length > 0) scheduleGit(engineCalls($), 200, true)
-  save($)
+  saveDeckState($)
 }
 
 /**
