@@ -6,8 +6,7 @@
  * messages between agents) into one live model, run git in the background,
  * and draw the views from `./views`. `/eagle-eye web` serves the same model as a
  * live dashboard in your own browser, or in the Desktop's Browser pane (`./web`).
- * Every `$` call lives in this file and in the modules it hands its parts to,
- * which import from it what of its own they read or ask for:
+ * Every `$` call lives in this file. It passes specific operations to
  * ./webServer (the web deck's server, folder, links and holds), ./gitRunner
  * (git, run), ./commands (`/eagle-eye`) and ./inspectHooks (Inspect's reads).
  */
@@ -24,9 +23,10 @@ import type {
   SessionMessage,
   Timer,
   ToolCallResult,
+  SettingsSource,
 } from 'claude-code'
 
-import type { DeckAck, DeckActivity, DeckAgent, DeckData, DeckMessage, DeckStatus, DeckView } from '../types/index.d.ts'
+import type { DeckAck, DeckActivity, DeckAgent, DeckData, DeckMessage, DeckStatus, DeckView, DeckWebSaved } from '../types/index.d.ts'
 import * as AV from '../web/avatars.mjs'
 import * as B from './background'
 import { runEagleEye } from './commands'
@@ -107,6 +107,62 @@ import {
 
 export const PANE = 'eagle-eye'
 const SNAPSHOT = { plugin: 'eagle-eye', key: 'snapshot' } as const
+const REPO_PIN = { plugin: 'eagle-eye', key: 'repo' } as const
+const WEB_STATE = { plugin: 'eagle-eye', key: 'web' } as const
+
+/** Engine calls used by Git, Inspect, the web deck and the command handler.
+ * Keep the hook's capability object here and give those modules specific operations.
+ */
+function engineCalls($: EngineInterface) {
+  return {
+    pluginRoot: $.plugin.root,
+    now: () => $.clock.now(),
+    after: (ms: number, callback: Parameters<EngineInterface['clock']['after']>[1]) => $.clock.after(ms, callback),
+    sessionsOverride: () => $.env.get('EAGLE_EYE_SESSIONS'),
+    homeOverride: () => $.env.get('EAGLE_EYE_HOME'),
+    configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
+    userProfile: () => $.env.get('USERPROFILE'),
+    home: () => $.env.get('HOME'),
+    listFiles: (path: string) => $.fs.list(path),
+    readFile: (path: string) => $.fs.read(path),
+    statFile: (path: string, options?: Parameters<EngineInterface['fs']['stat']>[1]) => $.fs.stat(path, options),
+    writeFile: (path: string, text: string) => $.fs.write(path, text),
+    runProcess: (argv: readonly string[], options?: Parameters<EngineInterface['process']['run']>[1]) => $.process.run(argv, options),
+    spawnProcess: (request: Parameters<EngineInterface['process']['spawn']>[0]) => $.process.spawn(request),
+    sessionSurfaces: () => $.session.surfaces(),
+    sessionModel: () => $.session.model(),
+    contextUsage: () => $.session.usage({ breakdown: 'summary' }),
+    settingsLayer: (source: SettingsSource) => $.settings.read({ source }),
+    outputStyle: () => $.settings.read({ key: 'outputStyle' }),
+    configList: () => $.config.list(),
+    closePane: (options: Parameters<EngineInterface['ui']['close']>[0]) => $.ui.close(options),
+    toast: (text: string) => $.ui.toast(text),
+    readRepoPin: () => $.state.get(REPO_PIN),
+    writeRepoPin: (value: string) => $.state.set(REPO_PIN, value),
+    readWebState: () => $.state.get(WEB_STATE),
+    writeWebState: (value: DeckWebSaved) => $.state.set(WEB_STATE, value),
+    previewStart: (url: string) => $.mcp.call('Claude_Browser', 'preview_start', { url }),
+    previewStartLegacy: (url: string) => $.mcp.call('Claude Browser', 'preview_start', { url }),
+    previewStartTool: (url: string) => $.tool.call({ tool: 'mcp__Claude_Browser__preview_start', url } as unknown as Parameters<EngineInterface['tool']['call']>[0]),
+    setAvatarStyle: (style: AV.AvatarStyle) => setAvatarStyle($, style),
+    savePrefs: () => savePrefs($),
+    changed: () => changed($),
+    clearFinished: () => clearFinished($),
+    showCleared: () => showCleared($),
+    toggleProbe: () => toggleProbe($),
+    toggleSessions: () => toggleSessions($),
+    openPane: () => openPane($),
+    loadDemo: (isFresh: boolean) => loadDemo($, isFresh),
+    redraw: () => redraw($),
+    save: () => save($),
+    redrawIfChanged: (now: number) => redrawIfChanged($, now),
+    ack: (id: string, status: DeckAck['status'], text: string) => ack($, id, status, text),
+    runCommand: (command: Record<string, unknown>) => runCommand($, command),
+  }
+}
+
+export type EngineCalls = ReturnType<typeof engineCalls>
+
 
 let data: DeckData = M.emptyData(0)
 let view: DeckView = M.defaultView()
@@ -237,7 +293,7 @@ function demoShown(): W.WebStateV2 | null {
  * tidying: nothing in Claude Code changes. Kept in the view, so a reload
  * keeps it. Answers what it did, in words, and acks `ackId`.
  */
-export async function clearFinished($: EngineInterface, ackId = ''): Promise<string> {
+async function clearFinished($: EngineInterface, ackId = ''): Promise<string> {
   const now = await $.clock.now()
   const state = shownV2Of(now)
   const ids = state ? W.finishedIdsOf(state) : []
@@ -253,7 +309,7 @@ export async function clearFinished($: EngineInterface, ackId = ''): Promise<str
 }
 
 /** "Show N cleared": the agents "Clear finished" hid shown again everywhere; acks `ackId`. */
-export async function showCleared($: EngineInterface, ackId = ''): Promise<string> {
+async function showCleared($: EngineInterface, ackId = ''): Promise<string> {
   const now = await $.clock.now()
   const count = shownV2Of(now)?.cleared?.count ?? 0
   if (view.v2.cleared.length === 0) {
@@ -298,7 +354,7 @@ function isOrgDownOn(surface: RenderSurface): boolean {
 let lastAgent: string | null = null
 
 /** Draws every site of this plugin again; the engine folds calls to ten a second. Events that change the data call it. */
-export function redraw($: EngineInterface) {
+function redraw($: EngineInterface) {
   drawn.clear()
   $.ui.invalidate('ui.render')
 }
@@ -365,11 +421,11 @@ function screenKey(now: number): string {
  * that changes the view draws unasked, through `changed`.) A change is the
  * web deck's signal too: its state is written again.
  */
-export function redrawIfChanged($: EngineInterface, now: number) {
+function redrawIfChanged($: EngineInterface, now: number) {
   const key = screenKey(now)
   if (key === shownKey) return
   shownKey = key
-  scheduleWeb($)
+  scheduleWeb(engineCalls($))
   SR.noteChanged(now)
   redraw($)
 }
@@ -408,7 +464,7 @@ async function readContextSoon($: EngineInterface): Promise<void> {
       }
       return
     }
-    if (await readInspectContext($, data)) touched($, await $.clock.now())
+    if (await readInspectContext(engineCalls($), data)) touched($, await $.clock.now())
   } catch {
     // Inspect's context is read again at the next measure
   }
@@ -417,8 +473,8 @@ async function readContextSoon($: EngineInterface): Promise<void> {
 /** Inspect: what is loaded (the model, the output style, the settings' hooks), then the context, read now. */
 async function readInspected($: EngineInterface): Promise<void> {
   try {
-    if (await readInspectLoaded($, data)) touched($, await $.clock.now())
-    if (await readInspectContext($, data)) touched($, await $.clock.now())
+    if (await readInspectLoaded(engineCalls($), data)) touched($, await $.clock.now())
+    if (await readInspectContext(engineCalls($), data)) touched($, await $.clock.now())
   } catch {
     // Inspect shows what it had
   }
@@ -615,10 +671,10 @@ function sendTitleOf(from: string, text: string): string {
 }
 
 /** Keeps the model in `$.state`, so a reload of this module picks it up again; while the debug folder is there, dumps it too, and while the web deck is on, writes its state. */
-export function save($: EngineInterface) {
+function save($: EngineInterface) {
   dataGen += 1
   scheduleDump($)
-  scheduleWeb($)
+  scheduleWeb(engineCalls($))
   if (timers.save) return
   timers.save = $.clock.after(1500, () => {
     timers.save = undefined
@@ -640,7 +696,7 @@ const debug = { isOn: false, loadedAt: 0, writes: 0, isPrivate: false }
 
 /** The debug folder, `<home>/debug`; '' with no home. */
 async function debugDirOf($: EngineInterface): Promise<string> {
-  const at = await homeOf($)
+  const at = await homeOf(engineCalls($))
   return at === '' ? '' : `${at}/${W.DEBUG_DIR}`
 }
 
@@ -684,7 +740,7 @@ async function writeDump($: EngineInterface): Promise<void> {
     const now = await $.clock.now()
     const name = W.fileNameOf(sessionId || 'state')
     // the dump's file made 0600 (its folder 0700) before its first write: the engine's write keeps that mode
-    if (!debug.isPrivate) debug.isPrivate = await runHome($, { op: 'prepare', home: homeDir(), id: name, files: [`${W.DEBUG_DIR}/${name}.json`], isOwnHome: isOwnHome() })
+    if (!debug.isPrivate) debug.isPrivate = await runHome(engineCalls($), { op: 'prepare', home: homeDir(), id: name, files: [`${W.DEBUG_DIR}/${name}.json`], isOwnHome: isOwnHome() })
     if (!debug.isPrivate) return
     debug.writes += 1
     const state = { meta: { at: now, loadedAt: debug.loadedAt, writes: debug.writes }, ...debugStateOf(now) }
@@ -767,7 +823,7 @@ function debugStateOf(now: number) {
  * ack under its `id`: the page's own, and one another session's deck sent
  * (`steerFromSession`), alike. Refused, its ack says why.
  */
-export function runCommand($: EngineInterface, cmd: Record<string, unknown>) {
+function runCommand($: EngineInterface, cmd: Record<string, unknown>) {
   const ackId = W.cmdIdOf(cmd)
   const route = W.routeOf(cmd, data)
   if (route === null) void ack($, ackId, 'failed', W.refusalOf(cmd, data))
@@ -797,12 +853,12 @@ async function repoFromPage($: EngineInterface, root: string, ackId: string): Pr
     void ack($, ackId, 'failed', 'Not a repository Changes offers here')
     return
   }
-  const why = await chooseRepo($, offered?.root ?? '')
+  const why = await chooseRepo(engineCalls($), offered?.root ?? '')
   void ack($, ackId, why === '' ? 'delivered' : 'failed', why || (offered ? `Changes shows ${offered.name}` : 'Changes follows the work again'))
 }
 
 /** Keeps the person's own settings in the store (`prefs`), for every session: the band hidden or not, and the avatar style. */
-export function savePrefs($: EngineInterface) {
+function savePrefs($: EngineInterface) {
   void $.store.set('prefs', { isBandHidden: view.isBandHidden, avatarStyle: view.avatarStyle }).catch(() => undefined)
 }
 
@@ -812,7 +868,7 @@ export function savePrefs($: EngineInterface) {
  * session; the pane draws again, and the web page follows with the state it
  * is written next (its `avatarStyle`).
  */
-export function setAvatarStyle($: EngineInterface, style: string) {
+function setAvatarStyle($: EngineInterface, style: string) {
   if (!AV.isStyle(style) || style === view.avatarStyle) return
   view.avatarStyle = style
   savePrefs($)
@@ -821,7 +877,7 @@ export function setAvatarStyle($: EngineInterface, style: string) {
 
 
 /** Says what came of the page's command `id` in the state it reads (`acks`); a command with no id is told nothing. */
-export async function ack($: EngineInterface, id: string, status: DeckAck['status'], text: string): Promise<void> {
+async function ack($: EngineInterface, id: string, status: DeckAck['status'], text: string): Promise<void> {
   if (id === '') return
   try {
     const now = await $.clock.now()
@@ -1451,13 +1507,13 @@ async function tick($: EngineInterface): Promise<void> {
   // a loop of Claude Code's own at work may be an agent the deck has not placed (a reload lost its spawn): the list says
   if (isAnyLive || isPaneOpen || isSharing() || M.hasLiveEngineLoops(data)) await syncAgents($)
   if (isPaneOpen || isSharing()) {
-    if (now - lastGitRead() > 6000) void refreshGit($)
+    if (now - lastGitRead() > 6000) void refreshGit(engineCalls($))
     if (now - usageAt > 10_000) void loadUsage($)
   }
   // what the deck may stop: Claude Code's permission check asked again where its verdict is missing or old
   if (isPaneOpen || isWebOn()) probeStops($, now)
   // the page's words held for your Send: those past their ten minutes, or answers to a question that no longer waits, go unsent
-  await pruneHeld($)
+  await pruneHeld(engineCalls($))
   // the pane's first tick looks again for what a reload lost (once a pass under way is done)
   if (!isPaneOpen) {
     recovery.isPaneSeen = false
@@ -1480,20 +1536,20 @@ function noteScreen(surface: RenderSurface, viewport: { rows: number } | undefin
 /** The cells the docked pane asks for. */
 const DOCK_COLUMNS = 120
 
-export async function openPane($: EngineInterface): Promise<boolean> {
+async function openPane($: EngineInterface): Promise<boolean> {
   // on a terminal of known height, an inline pane no taller than it leaves room for (`openRowsFor`): past the terminal's height, every redraw leaves stray lines
   const rows = openRowsFor(screenRows)
   // docked beside a fullscreen transcript: 120 cells, where the Dashboard sets its sections side by side (the engine keeps a dock to 45% of the terminal)
   const opened = await $.ui.open({ id: PANE, title: 'Eagle Eye', focus: true, columns: DOCK_COLUMNS, ...(rows !== undefined ? { rows } : {}) })
   isPaneOpen = true
-  void refreshGit($, true)
+  void refreshGit(engineCalls($), true)
   void loadUsage($)
   void syncAgents($)
-  if (view.commit) void loadCommit($, view.commit)
+  if (view.commit) void loadCommit(engineCalls($), view.commit)
   return opened.isPlaced
 }
 
-export function changed($: EngineInterface) {
+function changed($: EngineInterface) {
   save($)
   redraw($)
 }
@@ -1593,7 +1649,7 @@ function keepChat($: EngineInterface, now: number) {
  * that was kept at Chat's end scrolls to its top at once, where the list
  * opens, which releases it from the end the engine and the Desktop held it at.
  */
-export function toggleSessions($: EngineInterface) {
+function toggleSessions($: EngineInterface) {
   SR.toggleList()
   if (SR.isListOpen() && listStep(chatFollow) === 'start') scrollToStart($)
 }
@@ -1729,24 +1785,24 @@ function actionsFor($: EngineInterface): DeckActions {
       // Chat opened by a press (its tab, m) or filtered anew: the next drawing takes the pane to its newest message
       if (patch.tab === 'chat' || (patch.chatFilter !== undefined && patch.chatFilter !== view.v2.chatFilter)) chatFollow.isShown = false
       view.v2 = M.view2With(view.v2, patch)
-      if (view.v2.tab === 'changes' && view.file && currentGit().isRepo) void loadFileDiff($, view.file)
+      if (view.v2.tab === 'changes' && view.file && currentGit().isRepo) void loadFileDiff(engineCalls($), view.file)
       changed($)
     },
     // j and k: the focus a row down or up; n: the next thing that needs you
     focusNext: (dir, keys) => void focusNext($, dir, keys),
     focusNeed: () => void focusNeed($),
     // Changes' picks and Follow the work: the repository it shows pinned, or let follow the work again; the sample's are a recording
-    selectRepo: root => (view.isDemo ? $.ui.toast('Sample data: Changes shows the sample’s repository. Back to this chat to pick one of yours.') : void chooseRepo($, root).then(why => why && $.ui.toast(why))),
+    selectRepo: root => (view.isDemo ? $.ui.toast('Sample data: Changes shows the sample’s repository. Back to this chat to pick one of yours.') : void chooseRepo(engineCalls($), root).then(why => why && $.ui.toast(why))),
     selectFile: path => {
       view.file = view.file === path ? '' : path
       closeFileDiff()
-      if (view.file && currentGit().isRepo) void loadFileDiff($, path)
+      if (view.file && currentGit().isRepo) void loadFileDiff(engineCalls($), path)
       changed($)
     },
     selectCommit: hash => {
       view.commit = view.commit === hash ? '' : hash
       closeCommit()
-      if (view.commit) void loadCommit($, hash)
+      if (view.commit) void loadCommit(engineCalls($), hash)
       changed($)
     },
     toggleBand: () => {
@@ -1787,11 +1843,11 @@ function actionsFor($: EngineInterface): DeckActions {
       changed($)
       void openPane($)
     },
-    openBrowser: () => void openOwnBrowser($),
+    openBrowser: () => void openOwnBrowser(engineCalls($)),
     // the band's rows of what the Browser pane's page sent in your voice (./hold): your Send runs it, Discard drops it, More shows it whole
-    sendHeld: key => sendHeld($, key),
-    discardHeld: key => discardHeld($, key),
-    toggleHeld: key => toggleHeld($, key),
+    sendHeld: key => sendHeld(engineCalls($), key),
+    discardHeld: key => discardHeld(engineCalls($), key),
+    toggleHeld: key => toggleHeld(engineCalls($), key),
   }
 }
 
@@ -1902,7 +1958,7 @@ async function readV2Sample($: EngineInterface, dir: string, state: W.WebStateV2
  * now. `isFresh` opens it on Now; a reload keeps the tab and page it was on.
  * Answers why it could not be read; '' once it shows.
  */
-export async function loadDemo($: EngineInterface, isFresh: boolean): Promise<string> {
+async function loadDemo($: EngineInterface, isFresh: boolean): Promise<string> {
   const root = $.plugin.root.replace(/[\\/]+$/, '')
   view.isDemo = true
   if (isFresh) {
@@ -2001,14 +2057,14 @@ function registryHost($: EngineInterface): SR.RegistryHost {
     sessionId: () => sessionId,
     stateOf: now => v2Of(now),
     dirOf: () => webDir() || (sessionId !== '' ? W.webDirOf(homeDir(), sessionId) : ''),
-    pidOf: () => sessionPidOf($),
+    pidOf: () => sessionPidOf(engineCalls($)),
     steer: cmd => steerFromSession($, cmd),
     hasAck: id => data.acks.some(one => one.id === id),
     ack: (id, status, text) => void ack($, id, status, text),
     changed: () => changed($),
     refresh: now => redrawIfChanged($, now),
     // a deck views this session: its folder written from now, as for /eagle-eye web
-    share: () => shareWeb($),
+    share: () => shareWeb(engineCalls($)),
     toast: text => $.ui.toast(text),
   }
 }
@@ -2360,14 +2416,14 @@ async function answerInSample($: EngineInterface, callId: string, answers: Recor
 
 /** Marks the commits a shell command made as that agent's. */
 async function attributeCommits($: EngineInterface, agentId: string, before: string): Promise<void> {
-  const ran = await runGit($, before ? G.argv.newSince(before) : G.argv.recentHashes)
+  const ran = await runGit(engineCalls($), before ? G.argv.newSince(before) : G.argv.recentHashes)
   if (!ran.ok) return
   const hashes = ran.out.split('\n').map(line => line.trim()).filter(Boolean)
   const fresh = before ? hashes : hashes.slice(0, 1).filter(hash => hash !== currentGit().head)
   for (const hash of fresh) data.commitsBy[hash] = agentId
   const keys = Object.keys(data.commitsBy)
   if (keys.length > 300) for (const old of keys.slice(0, keys.length - 300)) delete data.commitsBy[old]
-  if (fresh.length > 0) scheduleGit($, 200, true)
+  if (fresh.length > 0) scheduleGit(engineCalls($), 200, true)
   save($)
 }
 
@@ -2408,7 +2464,7 @@ function stopProbe() {
  * `/eagle-eye probe`: opens the probe afresh with the keyboard (Esc closes it),
  * or closes it while it is open; the `ui.close` hook stops the tick.
  */
-export async function toggleProbe($: EngineInterface): Promise<CommandRunResult> {
+async function toggleProbe($: EngineInterface): Promise<CommandRunResult> {
   const panes = await $.ui.panes().catch(() => [])
   if (panes.some(pane => pane.id === PROBE)) {
     await $.ui.close({ id: PROBE })
@@ -2542,13 +2598,13 @@ export const register: Register = on => {
     }
     setPluginRoot($.plugin.root.replace(/[\\/]+$/, ''))
     // Eagle Eye's home: the gone sessions' folders swept, this one's made private before any deck writes there (never awaited)
-    await homeOf($)
-    void startHome($)
+    await homeOf(engineCalls($))
+    void startHome(engineCalls($))
     // every session on this machine: this deck's file in the registry, and the others' read (never awaited)
     void SR.startRegistry(registryHost($))
 
     // the web deck's supervisor, this session.start's: on again at once when a reload found it on
-    startSupervisor($)
+    startSupervisor(engineCalls($))
 
     try {
       const raw = await $.session.usage()
@@ -2572,7 +2628,7 @@ export const register: Register = on => {
     // a reload while the sample showed reads it again, on the tab and page it was on
     if (view.isDemo) void loadDemo($, false)
 
-    void startRepos($)
+    void startRepos(engineCalls($))
     void syncAgents($)
     // what a reload lost (the goal, an ended agent's result), read back from the transcripts: never awaited, it redraws when done
     void recoverLost($)
@@ -2588,7 +2644,7 @@ export const register: Register = on => {
     data = M.emptyData(now)
     closeCommit()
     closeFileDiff()
-    await clearWeb($)
+    await clearWeb(engineCalls($))
     changed($)
     return result
   })
@@ -2598,7 +2654,7 @@ export const register: Register = on => {
     const result = await next(e)
     await SR.endRegistry(e.reason)
     if (e.reason !== 'clear' && e.reason !== 'resume') {
-      await endWeb($)
+      await endWeb(engineCalls($))
       // the snapshot the host held of this session (its conversation) is cleared: nothing of it is kept once the session is over
       timers.save?.cancel()
       timers.save = undefined
@@ -2608,7 +2664,7 @@ export const register: Register = on => {
     return result
   })
 
-  on('command.run', { command: 'eagle-eye' }, async ($, e) => runEagleEye($, e))
+  on('command.run', { command: 'eagle-eye' }, async ($, e) => runEagleEye(engineCalls($), e))
 
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
@@ -2689,7 +2745,7 @@ export const register: Register = on => {
       sendTitles.push({ id: e.tool_use_id, from: agentId, text: input.message, summary })
       if (sendTitles.length > 20) sendTitles.splice(0, sendTitles.length - 20)
     }
-    const before = isShell && currentGit().isRepo && G.mayCommit(command) ? await runGit($, G.argv.head).then(ran => (ran.ok ? ran.out.trim() : '')) : ''
+    const before = isShell && currentGit().isRepo && G.mayCommit(command) ? await runGit(engineCalls($), G.argv.head).then(ran => (ran.ok ? ran.out.trim() : '')) : ''
     let ran: ToolCallResult
     try {
       // a question the deck may answer too: raced with its dialog beneath
@@ -2813,13 +2869,13 @@ export const register: Register = on => {
     }
 
     try {
-      if (isEdit || shellEdits > 0 || (isShell && G.mayChangeTree(command))) scheduleGit($, 700)
+      if (isEdit || shellEdits > 0 || (isShell && G.mayChangeTree(command))) scheduleGit(engineCalls($), 700)
       // a commit the shell reports by its sha is this agent's; else git is asked what is new
       const operation = record?.gitOperation
       const commit = operation && typeof operation === 'object' ? (operation as { commit?: { sha?: unknown } }).commit : undefined
       if (ok && commit && typeof commit.sha === 'string' && commit.sha !== '') {
         data.commitsBy[commit.sha] = agentId
-        scheduleGit($, 200, true)
+        scheduleGit(engineCalls($), 200, true)
       } else if (isShell && ok && G.mayCommit(command)) {
         void attributeCommits($, agentId, before)
       }
@@ -3108,7 +3164,7 @@ export const register: Register = on => {
         data.turns += 1
         data.turnMs += e.durationMs
       }
-      scheduleGit($, 300)
+      scheduleGit(engineCalls($), 300)
       touched($, now)
     } catch {
       // the turn's end stands whatever the deck makes of it
@@ -3283,7 +3339,7 @@ export const register: Register = on => {
     const verdict = await downstream
     const { decision, reason, rule, hook, setting, plugin } = verdict
     // Inspect's permissions log: every verdict on a real call, as the engine gave it
-    if (await inspectCheck($, data, e, { decision, reason, rule, hook, setting, plugin }, next.origin.plugin === $.plugin.name, currentGit().root || null)) touched($, await $.clock.now())
+    if (await inspectCheck(engineCalls($), data, e, { decision, reason, rule, hook, setting, plugin }, next.origin.plugin === $.plugin.name, currentGit().root || null)) touched($, await $.clock.now())
     try {
       // the deck's own calls, a query (no call), and the tools whose dialog is the person's own answer (a question, a plan) are no permission prompt
       const isPrompt = decision === 'ask' && e.tool_use_id !== undefined && e.tool_use_id !== '' && !PERSON_TOOLS.includes(e.tool) && next.origin.plugin !== $.plugin.name
@@ -3409,7 +3465,7 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    if (await inspectCompaction($, data, e, result)) {
+    if (await inspectCompaction(engineCalls($), data, e, result)) {
       touched($, await $.clock.now())
       void readContextSoon($)
     }
@@ -3438,13 +3494,13 @@ export const register: Register = on => {
 
   on('prompt.context', async ($, e, next) => {
     const result = await next(e)
-    if (await inspectInstructions($, data, result.instructionFiles ?? e.instructionFiles)) touched($, await $.clock.now())
+    if (await inspectInstructions(engineCalls($), data, result.instructionFiles ?? e.instructionFiles)) touched($, await $.clock.now())
     return result
   })
 
   on('classic.InstructionsLoaded', async ($, e, next) => {
     const result = await next(e)
-    if (await inspectInstructionLoaded($, data, e)) touched($, await $.clock.now())
+    if (await inspectInstructionLoaded(engineCalls($), data, e)) touched($, await $.clock.now())
     return result
   })
 

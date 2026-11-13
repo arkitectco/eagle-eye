@@ -12,14 +12,14 @@
  * redraw, an ack, a page command run) it imports from there, and git's state
  * from ./gitRunner. What is pure is ./web's.
  */
-import type { CommandRunResult, EngineInterface, Timer } from 'claude-code'
+import type { CommandRunResult, Timer } from 'claude-code'
+import type { EngineCalls } from './register'
 
 import * as F from './format'
 import { currentGit, currentGitDiffs, readGitDiffs } from './gitRunner'
 import * as H from './hold'
 import * as M from './model'
 import {
-  ack,
   answerGoneOf,
   currentAskers,
   currentCwd,
@@ -27,8 +27,6 @@ import {
   currentSessionId,
   currentUsage,
   currentView,
-  redraw,
-  runCommand,
   v2Of,
 } from './register'
 import * as SR from './registry'
@@ -37,7 +35,7 @@ import * as T from './timeline'
 import type { WebPane } from './ui/types'
 import * as W from './web'
 
-/** The mod's folder (`$.plugin.root`, no trailing separator). */
+/** The mod's folder (`host.pluginRoot`, no trailing separator). */
 let pluginRoot = ''
 /** Eagle Eye's home (`SE.homeDirOf`: `EAGLE_EYE_HOME`, else `eagle-eye` under Claude Code's configuration folder), where each session's state folder lies (`<home>/web/<sessionId>`) and the debug dump goes; '' until read, or when no home is known. */
 let home = ''
@@ -78,7 +76,6 @@ const timers: { web?: Timer } = {}
  * kept, and a page open on it hears its old handle refused and says to open
  * it again from the deck.
  */
-const WEB_STATE = { plugin: 'eagle-eye', key: 'web' } as const
 /** How long a start waits for the server's ready line. */
 const WEB_START_MS = 10_000
 
@@ -88,7 +85,7 @@ let isHomeOwn = false
 let homeRegistry = ''
 
 /** Eagle Eye's home (`home`), read from the environment once: '' when no home is known, and then nothing is kept on disk. */
-export async function homeOf($: EngineInterface): Promise<string> {
+export async function homeOf(host: EngineCalls): Promise<string> {
   if (home !== '') return home
   const read = async (get: () => Promise<string | undefined>) => {
     try {
@@ -98,10 +95,10 @@ export async function homeOf($: EngineInterface): Promise<string> {
     }
   }
   const env = {
-    override: await read(() => $.env.get('EAGLE_EYE_SESSIONS')),
-    eagleEyeHome: await read(() => $.env.get('EAGLE_EYE_HOME')),
-    configDir: await read(() => $.env.get('CLAUDE_CONFIG_DIR')),
-    home: (await read(() => $.env.get('USERPROFILE'))) ?? (await read(() => $.env.get('HOME'))),
+    override: await read(() => host.sessionsOverride()),
+    eagleEyeHome: await read(() => host.homeOverride()),
+    configDir: await read(() => host.configDir()),
+    home: (await read(() => host.userProfile())) ?? (await read(() => host.home())),
   }
   home = SE.homeDirOf(env)
   homeRegistry = SE.registryDirOf(env)
@@ -110,10 +107,10 @@ export async function homeOf($: EngineInterface): Promise<string> {
 }
 
 /** Asks web/home.js (node, no shell) to keep the home private, or to remove what the session no longer needs; whether it did. */
-export async function runHome($: EngineInterface, request: W.HomeRequest): Promise<boolean> {
+export async function runHome(host: EngineCalls, request: W.HomeRequest): Promise<boolean> {
   if (request.home === '') return false
   try {
-    const ran = await $.process.run(W.homeArgvOf(`${$.plugin.root.replace(/[\\/]+$/, '')}/web/home.js`, request), { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
+    const ran = await host.runProcess(W.homeArgvOf(`${host.pluginRoot.replace(/[\\/]+$/, '')}/web/home.js`, request), { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
     return ran.exitCode === 0 && W.isHomeDone(ran.stdout)
   } catch {
     return false
@@ -125,11 +122,11 @@ export async function runHome($: EngineInterface, request: W.HomeRequest): Promi
  * leaves its own), then this session's own made private, with its inbox,
  * before any deck writes there.
  */
-export async function startHome($: EngineInterface): Promise<void> {
+export async function startHome(host: EngineCalls): Promise<void> {
   if (home === '' || currentSessionId() === '') return
-  await runHome($, { op: 'sweep', home, registry: homeRegistry, keep: currentSessionId() })
+  await runHome(host, { op: 'sweep', home, registry: homeRegistry, keep: currentSessionId() })
   // the registry folder named too, so it and this session's file in it are made private (0700/0600) however the race with the registry writer goes
-  if (await runHome($, { op: 'prepare', home, id: currentSessionId(), files: [], isOwnHome: isHomeOwn, ...(homeRegistry !== '' ? { registry: homeRegistry } : {}) })) web.isPrivate = true
+  if (await runHome(host, { op: 'prepare', home, id: currentSessionId(), files: [], isOwnHome: isHomeOwn, ...(homeRegistry !== '' ? { registry: homeRegistry } : {}) })) web.isPrivate = true
 }
 
 const web: {
@@ -244,28 +241,28 @@ export function webDebugOf() {
 }
 
 /** The session's process id (`enginePidOf`), read once and kept for the server's `--parent`; '' when it could not be read. */
-export async function sessionPidOf($: EngineInterface): Promise<string> {
-  if (web.pid === '') web.pid = await enginePidOf($)
+export async function sessionPidOf(host: EngineCalls): Promise<string> {
+  if (web.pid === '') web.pid = await enginePidOf(host)
   return web.pid
 }
 
 /** A deck began to view this session (./registry): its folder written from now, as for /eagle-eye web. */
-export function shareWeb($: EngineInterface): void {
+export function shareWeb(host: EngineCalls): void {
   if (web.dir === '' && currentSessionId() !== '') web.dir = W.webDirOf(home, currentSessionId())
   web.lastKey = ''
   web.agentFiles.clear()
-  void readGitDiffs($)
-  scheduleWeb($)
+  void readGitDiffs(host)
+  scheduleWeb(host)
 }
 
 /** Starts the web deck's supervisor for a session.start (`superviseWeb`): the previous supervisor stops, and if a reload finds the deck was on, it comes on again at once. */
-export function startSupervisor($: EngineInterface): void {
+export function startSupervisor(host: EngineCalls): void {
   web.epoch += 1
   const wake = web.wake
   web.wake = undefined
   wake?.()
   web.stop?.()
-  void superviseWeb($, web.epoch)
+  void superviseWeb(host, web.epoch)
 }
 
 /** The web deck as the pane draws it: its link the `full` one the terminal shows (`web.shown`). */
@@ -280,8 +277,8 @@ function ticketFor(grade: W.WebGrade, until = 0): string {
 }
 
 /** Keeps the web deck's switch, port and folder in `$.state`, so a reload starts it again where it was; its secret never. */
-function saveWeb($: EngineInterface) {
-  void $.state.set(WEB_STATE, { isOn: web.isOn, port: web.port, dir: web.dir }).catch(() => undefined)
+function saveWeb(host: EngineCalls) {
+  void host.writeWebState({ isOn: web.isOn, port: web.port, dir: web.dir }).catch(() => undefined)
 }
 
 /** Settles every start waiting for the server: up, or not. */
@@ -305,11 +302,11 @@ export function isSharing(): boolean {
 }
 
 /** The data changed: the web deck's state is written within 300 ms while it is on (or this session is viewed); changes meanwhile ride along. */
-export function scheduleWeb($: EngineInterface) {
+export function scheduleWeb(host: EngineCalls) {
   if (!isSharing() || web.dir === '' || timers.web) return
-  timers.web = $.clock.after(W.WEB_WRITE_MS, () => {
+  timers.web = host.after(W.WEB_WRITE_MS, () => {
     timers.web = undefined
-    void writeWeb($)
+    void writeWeb(host)
   })
 }
 
@@ -319,12 +316,12 @@ export function scheduleWeb($: EngineInterface) {
  * engine's write keeps an existing file's mode. Those made already are not
  * asked again. False when it could not: then nothing is written.
  */
-async function makePrivate($: EngineInterface, files: readonly string[]): Promise<boolean> {
+async function makePrivate(host: EngineCalls, files: readonly string[]): Promise<boolean> {
   const id = W.idOfWebDir(home, web.dir)
   if (id === '') return false
   const fresh = files.map(file => W.homeFileOf(id, file)).filter(file => file !== '' && !web.made.has(file))
   if (web.isPrivate && fresh.length === 0) return true
-  if (!(await runHome($, { op: 'prepare', home, id, files: fresh, isOwnHome: isHomeOwn }))) return false
+  if (!(await runHome(host, { op: 'prepare', home, id, files: fresh, isOwnHome: isHomeOwn }))) return false
   web.isPrivate = true
   for (const file of fresh) web.made.add(file)
   return true
@@ -341,7 +338,7 @@ async function makePrivate($: EngineInterface, files: readonly string[]): Promis
  * to the folder is made 0600 first (`makePrivate`); nothing is written while
  * that fails. One write at a time: a change during one writes again after it.
  */
-async function writeWeb($: EngineInterface): Promise<void> {
+async function writeWeb(host: EngineCalls): Promise<void> {
   if (!isSharing() || web.dir === '') return
   if (web.isWriting) {
     web.isWriteQueued = true
@@ -356,7 +353,7 @@ async function writeWeb($: EngineInterface): Promise<void> {
   // each file written only while the folder is still this write's: an emptying or a removal since stops it (the catch below)
   const put = async (path: string, text: string) => {
     if (gen !== web.gen || !isSharing()) throw new Error('the folder was emptied or removed')
-    await $.fs.write(path, text)
+    await host.writeFile(path, text)
   }
   try {
     const patches = W.newPatchesOf(currentData(), web.written)
@@ -371,7 +368,7 @@ async function writeWeb($: EngineInterface): Promise<void> {
       ...agents.map(file => `agents/${file.id}.json`),
       ...diffs.map(diff => `gitdiffs/${diff.id}.diff`),
     ]
-    if (!(await makePrivate($, names))) return
+    if (!(await makePrivate(host, names))) return
     for (const patch of patches) {
       await put(`${web.dir}/patches/${patch.id}.diff`, patch.text)
       web.written.add(patch.id)
@@ -389,7 +386,7 @@ async function writeWeb($: EngineInterface): Promise<void> {
       await put(`${web.dir}/gitdiffs/${diff.id}.diff`, diff.text)
       web.gitDiffsWritten.add(diff.id)
     }
-    const now = await $.clock.now()
+    const now = await host.now()
     // Org's Timeline (timeline.json), before the state: written again when it says something new, its time aside
     const timeline = T.timelineTextOf(T.timelineOf(currentData(), v2Of(now)))
     const timelineKey = timeline.replace(/^\{"v":2,"now":\d+,/, '')
@@ -412,7 +409,7 @@ async function writeWeb($: EngineInterface): Promise<void> {
     done()
     if (web.isWriteQueued) {
       web.isWriteQueued = false
-      scheduleWeb($)
+      scheduleWeb(host)
     }
   }
 }
@@ -421,9 +418,9 @@ async function writeWeb($: EngineInterface): Promise<void> {
 const timelineWritten = { key: '' }
 
 /** The session's own process id, read as the parent of a node it starts (no shell between); '' when node cannot say. */
-async function enginePidOf($: EngineInterface): Promise<string> {
+async function enginePidOf(host: EngineCalls): Promise<string> {
   try {
-    const ran = await $.process.run(['node', '-p', 'process.ppid'], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
+    const ran = await host.runProcess(['node', '-p', 'process.ppid'], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
     const pid = ran.stdout.trim()
     return ran.exitCode === 0 && /^\d+$/.test(pid) ? pid : ''
   } catch {
@@ -439,16 +436,16 @@ async function enginePidOf($: EngineInterface): Promise<string> {
  * named) is let go, and removed when it is in the home: the server serves
  * this session's own.
  */
-async function superviseWeb($: EngineInterface, epoch: number): Promise<void> {
+async function superviseWeb(host: EngineCalls, epoch: number): Promise<void> {
   try {
-    const { value } = await $.state.get(WEB_STATE)
+    const { value } = await host.readWebState()
     if (value && value.isOn === true && epoch === web.epoch) {
       web.isOn = true
       web.port = typeof value.port === 'number' && value.port > 0 ? value.port : 0
-      const own = W.webDirOf(await homeOf($), currentSessionId())
+      const own = W.webDirOf(await homeOf(host), currentSessionId())
       if (typeof value.dir === 'string' && value.dir !== '' && value.dir !== own) {
         const old = W.idOfWebDir(home, value.dir)
-        if (old !== '' && old !== currentSessionId()) void runHome($, { op: 'remove', home, ids: [old] })
+        if (old !== '' && old !== currentSessionId()) void runHome(host, { op: 'remove', home, ids: [old] })
       }
       if (own !== '') web.dir = own
       web.status = 'starting'
@@ -465,7 +462,7 @@ async function superviseWeb($: EngineInterface, epoch: number): Promise<void> {
       continue
     }
     web.isAsked = false
-    await runWeb($, epoch)
+    await runWeb(host, epoch)
   }
 }
 
@@ -478,44 +475,44 @@ type WebRun = { isReady: boolean; isMissing: boolean; why: string }
  * web/server.js` starts with a new secret on its stdin. A restart on a
  * kept port that never comes up is tried once more on a port the OS picks.
  */
-async function runWeb($: EngineInterface, epoch: number): Promise<void> {
-  const root = $.plugin.root.replace(/[\\/]+$/, '')
+async function runWeb(host: EngineCalls, epoch: number): Promise<void> {
+  const root = host.pluginRoot.replace(/[\\/]+$/, '')
   const script = `${root}/web/server.js`
   web.status = 'starting'
   web.note = ''
-  if (web.dir === '') web.dir = W.webDirOf(await homeOf($), currentSessionId())
+  if (web.dir === '') web.dir = W.webDirOf(await homeOf(host), currentSessionId())
   // no home to keep its state in, or none that could be made private: the deck stays native
-  if (web.dir === '' || !(await makePrivate($, []))) {
+  if (web.dir === '' || !(await makePrivate(host, []))) {
     web.isOn = false
     web.status = 'failed'
     web.note = web.dir === '' ? 'No home folder is known (HOME), so the dashboard has nowhere to keep its state.' : 'Its state folder could not be made private, so the dashboard does not start.'
-    saveWeb($)
+    saveWeb(host)
     settleWeb(false)
-    redraw($)
+    host.redraw()
     return
   }
-  saveWeb($)
-  redraw($)
+  saveWeb(host)
+  host.redraw()
   web.lastKey = ''
   web.agentFiles.clear()
   timelineWritten.key = ''
-  void readGitDiffs($)
-  await writeWeb($)
-  if (web.pid === '') web.pid = await enginePidOf($)
+  void readGitDiffs(host)
+  await writeWeb(host)
+  if (web.pid === '') web.pid = await enginePidOf(host)
   // a newer session.start took over: the web deck is its supervisor's now
   if (epoch !== web.epoch) return
   // stopped while it was being readied: nothing to start
   if (!web.isOn) {
     web.status = 'off'
     settleWeb(false)
-    redraw($)
+    host.redraw()
     return
   }
   web.keptPort = web.port
-  let ran = await spawnWeb($, W.serverArgvOf(script, web.dir, web.pid, web.port, SR.registryDir()))
+  let ran = await spawnWeb(host, W.serverArgvOf(script, web.dir, web.pid, web.port, SR.registryDir()))
   if (!ran.isReady && !ran.isMissing && web.port > 0 && web.isOn && epoch === web.epoch) {
     web.port = 0
-    ran = await spawnWeb($, W.serverArgvOf(script, web.dir, web.pid, 0, SR.registryDir()))
+    ran = await spawnWeb(host, W.serverArgvOf(script, web.dir, web.pid, 0, SR.registryDir()))
   }
   web.keptPort = 0
   if (epoch !== web.epoch) return
@@ -529,8 +526,8 @@ async function runWeb($: EngineInterface, epoch: number): Promise<void> {
     web.isOn = false
     web.status = 'failed'
     web.note = 'Node.js was not found on PATH, so the dashboard cannot start.'
-    saveWeb($)
-    $.ui.toast('Eagle Eye web needs Node.js on PATH; the deck stays in its pane.')
+    saveWeb(host)
+    host.toast('Eagle Eye web needs Node.js on PATH; the deck stays in its pane.')
   } else {
     web.status = 'failed'
     web.note = ran.isReady
@@ -538,7 +535,7 @@ async function runWeb($: EngineInterface, epoch: number): Promise<void> {
       : `The dashboard's server did not start${ran.why ? ` (${ran.why})` : ''}.`
   }
   settleWeb(false)
-  redraw($)
+  host.redraw()
 }
 
 /** The last line a stream said, on one row. */
@@ -558,7 +555,7 @@ function lastLineOf(text: string): string {
  * the child ends or `web.stop` ends the loop. Rejects never: a start that
  * fails (no node) is a run that says so.
  */
-async function spawnWeb($: EngineInterface, argv: readonly string[]): Promise<WebRun> {
+async function spawnWeb(host: EngineCalls, argv: readonly string[]): Promise<WebRun> {
   let rest = ''
   let isReady = false
   let errors = ''
@@ -567,7 +564,7 @@ async function spawnWeb($: EngineInterface, argv: readonly string[]): Promise<We
   web.shown = ''
   try {
     // the secret on stdin, never argv or the environment, which other processes can read; started outside any workspace (Windows looks for a bare `node` in the working folder first)
-    const child = $.process.spawn({ argv, input: `${web.secret}\n`, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
+    const child = host.spawnProcess({ argv, input: `${web.secret}\n`, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
     stop = () => {
       void child.return({ code: null, signal: null }).catch(() => undefined)
     }
@@ -581,7 +578,7 @@ async function spawnWeb($: EngineInterface, argv: readonly string[]): Promise<We
       rest = cut.rest
       for (const line of cut.lines) {
         try {
-          if (onWebLine($, line)) isReady = true
+          if (onWebLine(host, line)) isReady = true
         } catch {
           // a line the deck could not act on is let go: the loop reads on
         }
@@ -609,13 +606,13 @@ async function spawnWeb($: EngineInterface, argv: readonly string[]): Promise<We
  * ack, the page's word on what came of it; a refused one gets the reason.
  * Anything else is ignored. Returns whether it was the ready line.
  */
-function onWebLine($: EngineInterface, line: string): boolean {
+function onWebLine(host: EngineCalls, line: string): boolean {
   const said = W.parseLine(line)
   if (said === null) return false
   if (said.kind === 'used') {
     if (said.nonce === W.nonceOf(web.shown)) {
       web.shown = ticketFor('full')
-      redraw($)
+      host.redraw()
     }
     return false
   }
@@ -626,27 +623,27 @@ function onWebLine($: EngineInterface, line: string): boolean {
     web.status = 'running'
     web.note = ''
     web.shown = ticketFor('full')
-    saveWeb($)
+    saveWeb(host)
     settleWeb(true)
     // the page open before a reload knows the old port only
-    if (kept > 0 && kept !== said.port) $.ui.toast('Eagle Eye web started again on another port: /eagle-eye web opens it again, and /eagle-eye shows its new link.')
-    redraw($)
+    if (kept > 0 && kept !== said.port) host.toast('Eagle Eye web started again on another port: /eagle-eye web opens it again, and /eagle-eye shows its new link.')
+    host.redraw()
     return true
   }
   // in your voice from the Browser pane's page, or any press of it for another session's deck: it waits for your Send above the prompt
   if (said.grade !== 'full' && H.isHeld(said.cmd, currentSessionId())) {
-    void holdFromPage($, said.cmd)
+    void holdFromPage(host, said.cmd)
     return false
   }
-  runFromPage($, said.cmd)
+  runFromPage(host, said.cmd)
   return false
 }
 
 /** A page's command run: one for another session's deck (the page views it) into its inbox, where its own deck takes it; this session's through `runCommand`. */
-function runFromPage($: EngineInterface, cmd: Record<string, unknown>): void {
+function runFromPage(host: EngineCalls, cmd: Record<string, unknown>): void {
   const other = SE.sessionCmdOf(cmd, currentSessionId())
   if (other) void SR.fromPage(other.session, other.cmd)
-  else runCommand($, cmd)
+  else host.runCommand(cmd)
 }
 
 /**
@@ -674,7 +671,7 @@ function heldToOf(cmd: Record<string, unknown>): string {
  * wait already. One for another session's deck goes into its inbox once
  * you press Send.
  */
-async function holdFromPage($: EngineInterface, cmd: Record<string, unknown>): Promise<void> {
+async function holdFromPage(host: EngineCalls, cmd: Record<string, unknown>): Promise<void> {
   const ackId = W.cmdIdOf(cmd)
   const other = SE.sessionCmdOf(cmd, currentSessionId())
   // one that names another session it cannot go to is never run as this one's
@@ -684,20 +681,20 @@ async function holdFromPage($: EngineInterface, cmd: Record<string, unknown>): P
   const gone = route?.kind === 'answer' ? answerGoneOf(route.callId) : ''
   const refusal = isElsewhere ? SE.steeringRefusalOf(cmd) : other ? (SE.steeringCmdOf(other.cmd) ? '' : SE.steeringRefusalOf(other.cmd)) : route === null ? W.refusalOf(cmd, currentData()) : gone
   if (refusal !== '' || held.items.length >= H.MOST_HELD) {
-    void ack($, ackId, 'failed', refusal || H.FULL_TEXT)
+    void host.ack(ackId, 'failed', refusal || H.FULL_TEXT)
     return
   }
-  const now = await $.clock.now()
+  const now = await host.now()
   const agentOfOther = other && (other.cmd.cmd === 'chat' || other.cmd.cmd === 'stopAgent') && other.cmd.agentId !== M.MAIN ? ` · ${F.trunc(F.oneLine(String(other.cmd.agentId)), 40)}` : ''
   const to = other ? `${SR.sessionNameOf(other.session)}${agentOfOther}` : heldToOf(cmd)
   held.seq += 1
   held.items.push(H.heldOf(other ? other.cmd : cmd, `h${held.seq}`, now, other?.session ?? '', to))
   held.version += 1
-  await ack($, ackId, 'held', H.HELD_TEXT)
-  $.ui.toast('From the web page: it waits above your prompt for your Send.')
+  await host.ack(ackId, 'held', H.HELD_TEXT)
+  host.toast('From the web page: it waits above your prompt for your Send.')
   // it goes unsent once its ten minutes are up (the tick looks too)
-  $.clock.after(H.HOLD_MS, () => void pruneHeld($))
-  redraw($)
+  host.after(H.HOLD_MS, () => void pruneHeld(host))
+  host.redraw()
 }
 
 /** Takes held command `key` out of the queue; undefined when it went already. */
@@ -716,43 +713,43 @@ function takeHeld(key: string): H.Held | undefined {
  * page's id); one for another session's deck goes into its inbox, sealed,
  * as ever. A long or many-line one goes only while its row is open (More).
  */
-export function sendHeld($: EngineInterface, key: string): void {
+export function sendHeld(host: EngineCalls, key: string): void {
   // a long or many-line one goes only once it is open, its whole text on screen (the band draws its Send only then)
   const shown = H.heldRowsOf(held.items.filter(one => one.key === key), held.open)[0]
   if (!shown || (shown.isLong && !shown.isOpen)) return
   const item = takeHeld(key)
   if (!item) return
   if (item.session === '') {
-    runCommand($, item.cmd)
+    host.runCommand(item.cmd)
   } else {
     void SR.fromPage(item.session, item.cmd).then(why => {
       // its own deck acks it in its own state; here the word it went
-      if (why === '') void ack($, item.ackId, 'queued', 'Sent to its deck')
+      if (why === '') void host.ack(item.ackId, 'queued', 'Sent to its deck')
     })
   }
-  redraw($)
+  host.redraw()
 }
 
 /** Your Discard on a held row: nothing is sent, and the page's ack says so. */
-export function discardHeld($: EngineInterface, key: string): void {
+export function discardHeld(host: EngineCalls, key: string): void {
   const item = takeHeld(key)
   if (!item) return
-  void ack($, item.ackId, 'failed', H.unsentText('discarded'))
-  redraw($)
+  void host.ack(item.ackId, 'failed', H.unsentText('discarded'))
+  host.redraw()
 }
 
 /** More and Less on a held row too long for one line: its whole text shown, or its start again. */
-export function toggleHeld($: EngineInterface, key: string): void {
+export function toggleHeld(host: EngineCalls, key: string): void {
   if (!held.items.some(item => item.key === key)) return
   if (!held.open.delete(key)) held.open.add(key)
   held.version += 1
-  redraw($)
+  host.redraw()
 }
 
 /** The held commands whose ten minutes are up go unsent, and an answer held for a question that no longer waits goes with why; the page's acks say so. */
-export async function pruneHeld($: EngineInterface): Promise<void> {
+export async function pruneHeld(host: EngineCalls): Promise<void> {
   if (held.items.length === 0) return
-  const now = await $.clock.now()
+  const now = await host.now()
   const expired = new Set(H.expiredOf(held.items, now))
   let isChanged = false
   for (const item of [...held.items]) {
@@ -761,13 +758,13 @@ export async function pruneHeld($: EngineInterface): Promise<void> {
     if (!expired.has(item) && gone === '') continue
     takeHeld(item.key)
     isChanged = true
-    void ack($, item.ackId, 'failed', gone || H.unsentText('expired'))
+    void host.ack(item.ackId, 'failed', gone || H.unsentText('expired'))
   }
-  if (isChanged) redraw($)
+  if (isChanged) host.redraw()
 }
 
 /** Starts the web deck when it is not running, and waits (10 s at most) for its server to be up. */
-async function ensureWeb($: EngineInterface): Promise<boolean> {
+async function ensureWeb(host: EngineCalls): Promise<boolean> {
   if (web.status === 'running' && web.port > 0) return true
   const isStarting = web.isOn && web.status === 'starting'
   web.isOn = true
@@ -775,7 +772,7 @@ async function ensureWeb($: EngineInterface): Promise<boolean> {
     web.status = 'starting'
     web.note = ''
     web.opened = ''
-    redraw($)
+    host.redraw()
     askWeb()
   }
   return new Promise<boolean>(resolve => {
@@ -786,7 +783,7 @@ async function ensureWeb($: EngineInterface): Promise<boolean> {
       timer.cancel()
       resolve(isUp)
     }
-    const timer = $.clock.after(WEB_START_MS, () => finish(false))
+    const timer = host.after(WEB_START_MS, () => finish(false))
     web.waiters.push(finish)
   })
 }
@@ -798,21 +795,21 @@ async function ensureWeb($: EngineInterface): Promise<boolean> {
  * sees the URL (checked with a headless session: the call's arguments and
  * result reach the mod alone).
  */
-async function openInBrowser($: EngineInterface, url: string): Promise<boolean> {
+async function openInBrowser(host: EngineCalls, url: string): Promise<boolean> {
   try {
-    const opened = await $.mcp.call('Claude_Browser', 'preview_start', { url })
+    const opened = await host.previewStart(url)
     if (opened.isError !== true) return true
   } catch {
     // not by that name
   }
   try {
-    const opened = await $.mcp.call('Claude Browser', 'preview_start', { url })
+    const opened = await host.previewStartLegacy(url)
     if (opened.isError !== true) return true
   } catch {
     // no Browser pane over MCP (a terminal, a headless run)
   }
   try {
-    const called = await $.tool.call({ tool: 'mcp__Claude_Browser__preview_start', url } as unknown as Parameters<EngineInterface['tool']['call']>[0])
+    const called = await host.previewStartTool(url)
     return called.deny === undefined && called.isError !== true
   } catch {
     return false
@@ -820,10 +817,10 @@ async function openInBrowser($: EngineInterface, url: string): Promise<boolean> 
 }
 
 /** Tries the Browser pane with the page; the pane shows the link when that fails. */
-async function showWeb($: EngineInterface, url: string): Promise<void> {
-  const isOpened = await openInBrowser($, url)
+async function showWeb(host: EngineCalls, url: string): Promise<void> {
+  const isOpened = await openInBrowser(host, url)
   web.opened = isOpened ? 'opened' : 'failed'
-  redraw($)
+  host.redraw()
 }
 
 /**
@@ -847,9 +844,9 @@ function webDownWhy(): string {
 }
 
 /** Whether the session draws only in a terminal, where there is no Browser pane; false while that is not known. */
-async function isTerminalOnly($: EngineInterface): Promise<boolean> {
+async function isTerminalOnly(host: EngineCalls): Promise<boolean> {
   try {
-    const surfaces = await $.session.surfaces()
+    const surfaces = await host.sessionSurfaces()
     return surfaces.length > 0 && surfaces.every(surface => surface === 'terminal')
   } catch {
     return false
@@ -870,30 +867,30 @@ async function isTerminalOnly($: EngineInterface): Promise<boolean> {
  * text and context, which the model reads, say where it is, never a link
  * nor why an opener failed. Without node the deck stays native.
  */
-export async function openWeb($: EngineInterface, where: 'own' | 'pane'): Promise<CommandRunResult> {
+export async function openWeb(host: EngineCalls, where: 'own' | 'pane'): Promise<CommandRunResult> {
   if (web.isEnded) return { text: WEB_ENDED_TEXT }
   if (where === 'own') {
-    const opened = await ownBrowserOpen($)
+    const opened = await ownBrowserOpen(host)
     if (opened.kind === 'down') return { text: `${opened.why} The deck stays in its pane: /eagle-eye.` }
     if (opened.kind === 'busy') return { text: 'Eagle Eye web is starting, and opens in your own browser once it is up.' }
     if (opened.kind === 'unopened') {
-      const copy = (await isTerminalOnly($)) ? ' The deck also shows a link to copy under its header.' : ''
+      const copy = (await isTerminalOnly(host)) ? ' The deck also shows a link to copy under its header.' : ''
       return { text: `Eagle Eye web is running on this machine, but your browser did not open. Open in browser, at the top of the deck (/eagle-eye), tries again.${copy}`, context: WEB_CONTEXT }
     }
     return { text: WEB_OPENED_TEXT, context: WEB_CONTEXT }
   }
-  const isUp = await ensureWeb($)
+  const isUp = await ensureWeb(host)
   if (!isUp) {
     const why = webDownWhy()
-    $.ui.toast(`Eagle Eye web: ${why}`)
+    host.toast(`Eagle Eye web: ${why}`)
     return { text: `${why} The deck stays in its pane: /eagle-eye.` }
   }
-  if (await isTerminalOnly($)) {
+  if (await isTerminalOnly(host)) {
     web.opened = 'failed'
-    redraw($)
+    host.redraw()
     return { text: WEB_NO_PANE_TEXT, context: WEB_CONTEXT }
   }
-  void showWeb($, W.webUrlOf(web.port, ticketFor('pane')))
+  void showWeb(host, W.webUrlOf(web.port, ticketFor('pane')))
   return { text: WEB_PANE_TEXT, context: WEB_CONTEXT }
 }
 
@@ -916,9 +913,9 @@ type OwnOpen = { kind: 'opened' } | { kind: 'busy' } | { kind: 'down'; why: stri
  * this press, opened in your own browser (`ownBrowserOpen`); a toast when it
  * could not (the terminal shows a link to copy).
  */
-export async function openOwnBrowser($: EngineInterface): Promise<void> {
-  const opened = await ownBrowserOpen($)
-  if (opened.kind === 'unopened') $.ui.toast(`Could not open your browser${opened.why ? ` (${F.trunc(F.oneLine(opened.why), 120)})` : ''}. In a terminal, the deck shows the link to copy under its header.`)
+export async function openOwnBrowser(host: EngineCalls): Promise<void> {
+  const opened = await ownBrowserOpen(host)
+  if (opened.kind === 'unopened') host.toast(`Could not open your browser${opened.why ? ` (${F.trunc(F.oneLine(opened.why), 120)})` : ''}. In a terminal, the deck shows the link to copy under its header.`)
 }
 
 /**
@@ -930,35 +927,35 @@ export async function openOwnBrowser($: EngineInterface): Promise<void> {
  * link on its stdin. Its ticket works for `W.OPENER_TICKET_MS` only, unless
  * the page traded it by then.
  */
-async function ownBrowserOpen($: EngineInterface): Promise<OwnOpen> {
+async function ownBrowserOpen(host: EngineCalls): Promise<OwnOpen> {
   if (web.status !== 'running' || web.port <= 0) {
     if (isBrowserWaiting) return { kind: 'busy' }
     if (web.isEnded) {
-      $.ui.toast(WEB_ENDED_TEXT)
+      host.toast(WEB_ENDED_TEXT)
       return { kind: 'down', why: WEB_ENDED_TEXT }
     }
     isBrowserWaiting = true
     let isUp = false
     try {
-      isUp = await ensureWeb($)
+      isUp = await ensureWeb(host)
     } finally {
       isBrowserWaiting = false
     }
     if (!isUp) {
       const why = webDownWhy()
-      $.ui.toast(`Eagle Eye web: ${why}`)
+      host.toast(`Eagle Eye web: ${why}`)
       return { kind: 'down', why }
     }
   }
-  const until = Math.ceil(((await $.clock.now()) + W.OPENER_TICKET_MS) / 1000)
+  const until = Math.ceil(((await host.now()) + W.OPENER_TICKET_MS) / 1000)
   const ticket = web.status === 'running' && web.port > 0 ? ticketFor('full', until) : ''
   if (ticket === '') {
-    $.ui.toast('Eagle Eye web is not running: Open in browser starts it.')
+    host.toast('Eagle Eye web is not running: Open in browser starts it.')
     return { kind: 'down', why: 'Eagle Eye web is not running.' }
   }
   let why = ''
   try {
-    const ran = await $.process.run(['node', `${$.plugin.root.replace(/[\\/]+$/, '')}/web/open.js`], { stdin: `${W.webUrlOf(web.port, ticket)}\n`, timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
+    const ran = await host.runProcess(['node', `${host.pluginRoot.replace(/[\\/]+$/, '')}/web/open.js`], { stdin: `${W.webUrlOf(web.port, ticket)}\n`, timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
     if (ran.exitCode === 0 && W.isHomeDone(ran.stdout)) return { kind: 'opened' }
     why = W.openWhyOf(ran.stdout)
   } catch (error) {
@@ -968,7 +965,7 @@ async function ownBrowserOpen($: EngineInterface): Promise<OwnOpen> {
 }
 
 /** `/eagle-eye web stop`: the server ends, the state is no longer written, and the next start makes a new link. Answers whether it was on. */
-export function stopWeb($: EngineInterface): boolean {
+export function stopWeb(host: EngineCalls): boolean {
   const wasOn = web.isOn || web.status === 'running' || web.status === 'starting'
   web.isOn = false
   web.isAsked = false
@@ -981,10 +978,10 @@ export function stopWeb($: EngineInterface): boolean {
   web.opened = ''
   timers.web?.cancel()
   timers.web = undefined
-  saveWeb($)
+  saveWeb(host)
   web.stop?.()
   settleWeb(false)
-  redraw($)
+  host.redraw()
   return wasOn
 }
 
@@ -994,7 +991,7 @@ export function stopWeb($: EngineInterface): boolean {
  * inbox kept, and what the deck wrote is forgotten, so the next write makes
  * each file afresh (0600 again).
  */
-export async function clearWeb($: EngineInterface): Promise<void> {
+export async function clearWeb(host: EngineCalls): Promise<void> {
   const id = W.idOfWebDir(home, web.dir)
   web.gen += 1
   await web.writing
@@ -1004,7 +1001,7 @@ export async function clearWeb($: EngineInterface): Promise<void> {
   web.made.clear()
   web.lastKey = ''
   timelineWritten.key = ''
-  if (id !== '') await runHome($, { op: 'clear', home, id })
+  if (id !== '') await runHome(host, { op: 'clear', home, id })
 }
 
 /**
@@ -1013,7 +1010,7 @@ export async function clearWeb($: EngineInterface): Promise<void> {
  * id names, if a reload after a /clear moved it). A folder a crash left is
  * swept at the next start instead.
  */
-export async function endWeb($: EngineInterface): Promise<void> {
+export async function endWeb(host: EngineCalls): Promise<void> {
   web.isEnded = true
   web.isAsked = false
   web.gen += 1
@@ -1022,5 +1019,5 @@ export async function endWeb($: EngineInterface): Promise<void> {
   web.stop?.()
   await web.writing
   const ids = [...new Set([W.idOfWebDir(home, web.dir), W.idOfWebDir(home, W.webDirOf(home, currentSessionId()))])].filter(id => id !== '')
-  if (ids.length > 0) await runHome($, { op: 'remove', home, ids })
+  if (ids.length > 0) await runHome(host, { op: 'remove', home, ids })
 }

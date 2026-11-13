@@ -9,7 +9,7 @@
  * - `session.compact`: a compaction that stands (its summary, its tokens
  *   before and after) or one refused; `precompute` is no compaction.
  * - `session.measure`, and each compaction: the context read again as
- *   /context breaks it down (`$.session.usage({ breakdown: 'summary' })`,
+ *   /context breaks it down (`host.contextUsage()`,
  *   which sends no request), at most once every 10 s (`contextWaitOf`).
  * - `prompt.context`: the instruction files the conversation carries;
  *   `classic.InstructionsLoaded`: each one loaded, and why.
@@ -22,7 +22,8 @@
  *   start and end: the permission decisions, the skills run, the MCP tools
  *   called.
  */
-import type { EngineInterface, SessionCompactInput, SessionCompactResult } from 'claude-code'
+import type { SessionCompactInput, SessionCompactResult } from 'claude-code'
+import type { EngineCalls } from './register'
 
 import type { DeckData, DeckHook } from '../types'
 import * as I from './inspect'
@@ -44,12 +45,12 @@ export function contextWaitOf(now: number): number {
 }
 
 /** The context's breakdown read now, and what it lists of what is loaded. Whether it was recorded. */
-export async function readInspectContext($: EngineInterface, data: DeckData): Promise<boolean> {
+export async function readInspectContext(host: EngineCalls, data: DeckData): Promise<boolean> {
   if (read.isBusy) return false
   read.isBusy = true
   try {
-    const raw = await $.session.usage({ breakdown: 'summary' })
-    const now = await $.clock.now()
+    const raw = await host.contextUsage()
+    const now = await host.now()
     read.at = now
     const breakdown = raw.context.breakdown
     if (!breakdown) return false
@@ -64,33 +65,33 @@ export async function readInspectContext($: EngineInterface, data: DeckData): Pr
 }
 
 /** The model, the output style and the hooks of every settings source, as the engine reads them now. Whether they were recorded. */
-export async function readInspectLoaded($: EngineInterface, data: DeckData): Promise<boolean> {
+export async function readInspectLoaded(host: EngineCalls, data: DeckData): Promise<boolean> {
   try {
-    const at = await $.clock.now()
+    const at = await host.now()
     let model = ''
     try {
-      model = await $.session.model()
+      model = await host.sessionModel()
     } catch {
       // the model shows once a request reports it
     }
     const hooks: DeckHook[] = []
     for (const source of SOURCES) {
       try {
-        hooks.push(...I.hooksOf(await $.settings.read({ source }), source))
+        hooks.push(...I.hooksOf(await host.settingsLayer(source), source))
       } catch {
         // a source the engine bars from the read lists none
       }
     }
     let outputStyle = ''
     try {
-      const style = await $.settings.read({ key: 'outputStyle' })
+      const style = await host.outputStyle()
       if (typeof style === 'string') outputStyle = style
     } catch {
       // none set in the settings: /config's row says it below
     }
     if (outputStyle === '') {
       try {
-        const row = (await $.config.list()).find(one => /^output.?style$/i.test(one.key) || /^output style$/i.test(one.label))
+        const row = (await host.configList()).find(one => /^output.?style$/i.test(one.key) || /^output style$/i.test(one.label))
         if (row && typeof row.value === 'string') outputStyle = row.value
       } catch {
         // no row for it: the output style is left unsaid
@@ -105,10 +106,10 @@ export async function readInspectLoaded($: EngineInterface, data: DeckData): Pro
 }
 
 /** A `session.compact` and what came of it: one that stands, or one refused; nothing for a `precompute`. Whether it was recorded. */
-export async function inspectCompaction($: EngineInterface, data: DeckData, e: SessionCompactInput, result: SessionCompactResult): Promise<boolean> {
+export async function inspectCompaction(host: EngineCalls, data: DeckData, e: SessionCompactInput, result: SessionCompactResult): Promise<boolean> {
   if (e.trigger === 'precompute') return false
   try {
-    const at = await $.clock.now()
+    const at = await host.now()
     const agent = e.agentId ?? M.MAIN
     if (result.skip !== undefined) {
       I.noteCompaction(data, { agent, trigger: e.trigger, summary: '', skipped: result.skip, at })
@@ -124,13 +125,13 @@ export async function inspectCompaction($: EngineInterface, data: DeckData, e: S
 }
 
 /** The instruction files `prompt.context` says the conversation carries (its answer's, else its input's). Whether any was recorded. */
-export async function inspectInstructions($: EngineInterface, data: DeckData, files: readonly { path: string; kind: string; content: string; parent?: string }[] | undefined): Promise<boolean> {
+export async function inspectInstructions(host: EngineCalls, data: DeckData, files: readonly { path: string; kind: string; content: string; parent?: string }[] | undefined): Promise<boolean> {
   if (!files || files.length === 0) return false
   try {
     I.noteInstructions(
       data,
       files.map(file => ({ path: file.path, kind: file.kind, content: file.content, ...(file.parent ? { parent: file.parent } : {}) })),
-      await $.clock.now(),
+      await host.now(),
     )
     return true
   } catch {
@@ -140,9 +141,9 @@ export async function inspectInstructions($: EngineInterface, data: DeckData, fi
 }
 
 /** One file classic.InstructionsLoaded says loaded. Whether it was recorded. */
-export async function inspectInstructionLoaded($: EngineInterface, data: DeckData, e: { file_path: string; memory_type: string; load_reason: string; trigger_file_path?: string; parent_file_path?: string }): Promise<boolean> {
+export async function inspectInstructionLoaded(host: EngineCalls, data: DeckData, e: { file_path: string; memory_type: string; load_reason: string; trigger_file_path?: string; parent_file_path?: string }): Promise<boolean> {
   try {
-    I.noteInstructionLoaded(data, { path: e.file_path, memoryType: e.memory_type, reason: e.load_reason, ...(e.trigger_file_path ? { trigger: e.trigger_file_path } : {}), ...(e.parent_file_path ? { parent: e.parent_file_path } : {}) }, await $.clock.now())
+    I.noteInstructionLoaded(data, { path: e.file_path, memoryType: e.memory_type, reason: e.load_reason, ...(e.trigger_file_path ? { trigger: e.trigger_file_path } : {}), ...(e.parent_file_path ? { parent: e.parent_file_path } : {}) }, await host.now())
     return true
   } catch {
     // the file is loaded whatever the deck makes of it
@@ -161,10 +162,10 @@ export function inspectMode(data: DeckData, input: { permission_mode?: unknown; 
 }
 
 /** A call's `tool.check` verdict: recorded unless it is a query, the deck's own, or a question's. Whether it was. */
-export async function inspectCheck($: EngineInterface, data: DeckData, e: { tool: string; input: unknown; tool_use_id?: string; agentId?: string; approver?: string }, verdict: I.CheckIn['verdict'], isOwn: boolean, root: string | null): Promise<boolean> {
+export async function inspectCheck(host: EngineCalls, data: DeckData, e: { tool: string; input: unknown; tool_use_id?: string; agentId?: string; approver?: string }, verdict: I.CheckIn['verdict'], isOwn: boolean, root: string | null): Promise<boolean> {
   if (isOwn || !e.tool_use_id) return false
   try {
-    return I.noteCheck(data, { id: e.tool_use_id, tool: e.tool, input: e.input, agentId: e.agentId ?? M.MAIN, verdict, ...(e.approver ? { approver: e.approver } : {}), at: await $.clock.now(), root }) !== undefined
+    return I.noteCheck(data, { id: e.tool_use_id, tool: e.tool, input: e.input, agentId: e.agentId ?? M.MAIN, verdict, ...(e.approver ? { approver: e.approver } : {}), at: await host.now(), root }) !== undefined
   } catch {
     // the verdict stands whatever the deck makes of it
     return false
