@@ -1,0 +1,3502 @@
+/**
+ * Eagle Eye: a pane (`/eagle-eye`) that shows the session's git state and every
+ * agent's work, and a band above the prompt while subagents run.
+ *
+ * The hooks here record what the engine reports (tool calls, spawns, turns,
+ * messages between agents) into one live model, run git in the background,
+ * and draw the views from `./views`. `/eagle-eye web` serves the same model as a
+ * live dashboard in your own browser, or in the Desktop's Browser pane (`./web`).
+ * Every `$` call lives in this file and in the modules it hands its parts to,
+ * which import from it what of its own they read or ask for:
+ * ./webServer (the web deck's server, folder, links and holds), ./gitRunner
+ * (git, run), ./commands (`/eagle-eye`) and ./inspectHooks (Inspect's reads).
+ */
+import type {
+  AgentInfo,
+  CommandRunResult,
+  Elements,
+  EngineInterface,
+  Events,
+  Register,
+  RenderElement,
+  RenderInput,
+  RenderSurface,
+  SessionMessage,
+  Timer,
+  ToolCallResult,
+} from 'claude-code'
+
+import type { DeckAck, DeckActivity, DeckAgent, DeckData, DeckMessage, DeckStatus, DeckView } from '../types'
+import * as AV from '../web/avatars.mjs'
+import * as B from './background'
+import { runEagleEye } from './commands'
+import { addedFileHunks, countOf, patchOf, replaceHunks, type Hunk } from './diff'
+import * as F from './format'
+import * as G from './git'
+import {
+  chooseRepo,
+  closeCommit,
+  closeFileDiff,
+  currentCommit,
+  currentFileDiff,
+  currentGit,
+  currentGitDiffs,
+  lastGitRead,
+  loadCommit,
+  loadFileDiff,
+  refreshGit,
+  repoBook,
+  runGit,
+  scheduleGit,
+  startRepos,
+} from './gitRunner'
+import * as H from './hold'
+import {
+  contextWaitOf,
+  inspectCalled,
+  inspectCheck,
+  inspectCompaction,
+  inspectDenied,
+  inspectDialog,
+  inspectEnded,
+  inspectInstructionLoaded,
+  inspectInstructions,
+  inspectMode,
+  inspectRan,
+  readInspectContext,
+  readInspectLoaded,
+} from './inspectHooks'
+import * as M from './model'
+import * as R from './repos'
+import * as SR from './registry'
+import * as SE from './sessions'
+import type { DashModel, DeckModel, Kit, UsageInfo } from './ui/types'
+import { chatEndOf, followStep, isAtEndAfter, listStep, type ChatFollow } from './ui/v2/chat'
+import { openRowsFor, paneRowsFor } from './ui/v2/fit'
+import { newRenderMemo } from './renderMemo'
+import * as T from './timeline'
+import { bandOf, deckView, type DeckActions } from './views'
+import * as W from './web'
+import {
+  clearWeb,
+  discardHeld,
+  endWeb,
+  heldQueue,
+  homeDir,
+  homeOf,
+  isOwnHome,
+  isSharing,
+  isWebOn,
+  nodeCwd,
+  openOwnBrowser,
+  openWeb,
+  pruneHeld,
+  runHome,
+  scheduleWeb,
+  sendHeld,
+  sessionPidOf,
+  setPluginRoot,
+  shareWeb,
+  startHome,
+  startSupervisor,
+  toggleHeld,
+  webDebugOf,
+  webDir,
+  webPaneOf,
+} from './webServer'
+
+export const PANE = 'eagle-eye'
+const SNAPSHOT = { plugin: 'eagle-eye', key: 'snapshot' } as const
+
+let data: DeckData = M.emptyData(0)
+let view: DeckView = M.defaultView()
+let cwd = ''
+let sessionId = ''
+let usage: UsageInfo | null = null
+let usageAt = 0
+/** The `source` of Claude Code's SessionStart for this process's session, which arrives just before `session.start`; '' until it arrives, and after a reload, when the snapshot's `data.isFork` stands in for it. */
+let startedAs = ''
+let isPaneOpen = false
+const timers: { save?: Timer; tick?: Timer; dump?: Timer } = {}
+/** The screen key the last drawing showed (or the last timed redraw asked for); see `screenKey`. */
+let shownKey = ''
+let gitKeyMemo: { of: G.GitState; key: string } | null = null
+
+/** The session's data as the deck holds it now (`data`), for the modules this one hands its parts to. */
+export function currentData(): DeckData {
+  return data
+}
+
+/** The pane's view now (`view`). */
+export function currentView(): DeckView {
+  return view
+}
+
+/** The session's spend and context as last read (`usage`); null before. */
+export function currentUsage(): UsageInfo | null {
+  return usage
+}
+
+/** The session's id (`sessionId`); '' before it is read. */
+export function currentSessionId(): string {
+  return sessionId
+}
+
+/** The session's own folder (`cwd`). */
+export function currentCwd(): string {
+  return cwd
+}
+
+/** The questions whose race with Claude Code's dialog runs in this module (`askers`), by their call's id. */
+export function currentAskers(): ReadonlyMap<string, unknown> {
+  return askers
+}
+
+/** The pane was closed (`/eagle-eye close`): the deck no longer takes it for open. */
+export function paneClosed(): void {
+  isPaneOpen = false
+}
+
+/**
+ * The sample `/eagle-eye demo` shows: `v2` the v2 sample (web/fixtures/state.v2.json,
+ * `W.v2StateFromText`, its times moved to the moment it was read), null
+ * while it is read or when it could not be; `v2Files` its lazy files
+ * (web/fixtures/v2/), as read. `note` says why it could not be read;
+ * `version` counts its changes (an answer given in it), for the screen key.
+ */
+const demo: { v2: W.WebStateV2 | null; v2Files: W.V2Files; note: string; version: number } = {
+  v2: null,
+  v2Files: W.v2FilesFrom({ agents: {}, patches: {}, messages: {} }),
+  note: '',
+  version: 0,
+}
+
+/** Counts the saves (`save`): each change of the data the deck keeps moves it on. */
+let dataGen = 0
+
+/**
+ * The v2 view model (`W.deckStateOf`) as the screen
+ * stands, shared by the pane (`dashOf`), the band, state.json (`writeWeb`)
+ * and the debug dump, with what it shows as one key (`W.v2KeyOf`). Each
+ * screen key builds it afresh (`screenKey`); `v2Of` builds it again only
+ * when the data was saved since (`dataGen`), git was read or the usage
+ * loaded again, a minute turned (the ages and times it words), or the
+ * questions the deck may answer changed.
+ */
+const v2Memo: { key: string; data: DeckData | null; git: G.GitState | null; usage: UsageInfo | null; diffs: W.GitDiffs | null; state: W.WebStateV2 | null; shows: string } = {
+  key: '',
+  data: null,
+  git: null,
+  usage: null,
+  diffs: null,
+  state: null,
+  shows: '',
+}
+
+export function v2Of(now: number, isFresh = false): W.WebStateV2 {
+  const asking = [...askers.keys()]
+  const key = [dataGen, M.minuteOf(now), asking.join(','), sessionId, cwd, view.avatarStyle, clearedKey(), SR.listKey()].join('\u0001')
+  const git = currentGit()
+  const gitDiffs = currentGitDiffs()
+  if (!isFresh && v2Memo.state && v2Memo.key === key && v2Memo.data === data && v2Memo.git === git && v2Memo.usage === usage && v2Memo.diffs === gitDiffs) return v2Memo.state
+  // a question the page may answer is one whose race runs in this module: none after a reload
+  const built = W.deckStateOf(data, git, usage, now, sessionId, cwd, new Set(asking), gitDiffs, view.avatarStyle, clearedOf())
+  // every session on this machine, this one first (./registry): once the registry was read
+  const sessions = SR.sessionsFor(built, now)
+  const state = sessions ? { ...built, sessions } : built
+  Object.assign(v2Memo, { key, data, git, usage, diffs: gitDiffs, state, shows: W.v2KeyOf(state) })
+  return state
+}
+
+/** What "Clear finished" hid, as the view keeps it (`DeckView2.cleared`, `clearedAt`). */
+function clearedOf(): W.Cleared {
+  return { ids: view.v2.cleared, at: view.v2.clearedAt }
+}
+
+/** What "Clear finished" hid, as one string: a change marks the state anew. */
+function clearedKey(): string {
+  return `${view.v2.cleared.length}:${view.v2.clearedAt}`
+}
+
+/** The sample with what "Clear finished" hid marked, kept while neither changes. */
+const demoMemo: { of: W.WebStateV2 | null; key: string; state: W.WebStateV2 | null } = { of: null, key: '', state: null }
+
+/** The sample as the pane shows it: what "Clear finished" hid marked (`W.clearedStateOf`); null while it is read. */
+function demoShown(): W.WebStateV2 | null {
+  const sample = demo.v2
+  if (sample === null) return null
+  const key = clearedKey()
+  if (demoMemo.of !== sample || demoMemo.key !== key || demoMemo.state === null) Object.assign(demoMemo, { of: sample, key, state: W.clearedStateOf(sample, clearedOf()) })
+  return demoMemo.state
+}
+
+/**
+ * "Clear finished": every agent shown that is finished (done, failed,
+ * stopped or idle) hidden from the Dashboard, Chat's members and Everyone,
+ * and Org, in this session's deck or the sample shown. The deck's own
+ * tidying: nothing in Claude Code changes. Kept in the view, so a reload
+ * keeps it. Answers what it did, in words, and acks `ackId`.
+ */
+export async function clearFinished($: EngineInterface, ackId = ''): Promise<string> {
+  const now = await $.clock.now()
+  const state = shownV2Of(now)
+  const ids = state ? W.finishedIdsOf(state) : []
+  if (ids.length === 0) {
+    await ack($, ackId, 'failed', 'Nothing finished to clear')
+    return 'Nothing finished to clear.'
+  }
+  view.v2 = M.clearedWith(view.v2, ids, now)
+  changed($)
+  const said = `Cleared ${ids.length} finished ${ids.length === 1 ? 'agent' : 'agents'} from the deck`
+  await ack($, ackId, 'delivered', said)
+  return `${said} (Claude Code keeps them). /eagle-eye clear show brings them back.`
+}
+
+/** "Show N cleared": the agents "Clear finished" hid shown again everywhere; acks `ackId`. */
+export async function showCleared($: EngineInterface, ackId = ''): Promise<string> {
+  const now = await $.clock.now()
+  const count = shownV2Of(now)?.cleared?.count ?? 0
+  if (view.v2.cleared.length === 0) {
+    await ack($, ackId, 'failed', 'Nothing cleared to show')
+    return 'Nothing cleared to show.'
+  }
+  view.v2 = M.view2With(view.v2, { cleared: [], clearedAt: 0 })
+  changed($)
+  const said = count > 0 ? `Showing ${count} cleared ${count === 1 ? 'agent' : 'agents'} again` : 'Showing the cleared agents again'
+  await ack($, ackId, 'delivered', said)
+  return `${said}.`
+}
+
+
+/** The key of the Button the pane's focus ring is on, as `ui.focus` last landed it ('' for none, or one of the engine's own stops): where `j`, `k` and `n` move it from. */
+let paneFocus = ''
+
+/** The moves of the pane the deck asked for (`$.ui.scroll`), for the debug dump: how many in all, and the newest ten, where each took it ("end", "start", a key and where it lands). */
+const paneMoves = { count: 0, latest: [] as string[] }
+
+/** A move of the pane the deck asks for, noted for the debug dump. */
+function noteMove(to: string) {
+  paneMoves.count += 1
+  paneMoves.latest = [...paneMoves.latest, to].slice(-10)
+}
+
+/**
+ * The surfaces whose Org chart Client failed (`ui.fault`): their Org lists
+ * the agents as a tree while it stays open. A drawing of anything else
+ * (another tab, an agent's page, Inspect) clears its surface, so the chart
+ * is tried again the next time Org shows; /eagle-eye clears them all.
+ */
+export const orgDown = new Set<RenderSurface>()
+
+/** Whether this surface's Org lists the agents instead of its chart: the chart failed there and Org has not been left since. */
+function isOrgDownOn(surface: RenderSurface): boolean {
+  if (view.v2.tab !== 'org' || view.page !== '') orgDown.delete(surface)
+  return orgDown.has(surface)
+}
+
+/** The agent whose page was opened last: Org's chart marks it. */
+let lastAgent: string | null = null
+
+/** Draws every site of this plugin again; the engine folds calls to ten a second. Events that change the data call it. */
+export function redraw($: EngineInterface) {
+  drawn.clear()
+  $.ui.invalidate('ui.render')
+}
+
+/**
+ * The trees the pane and the band drew last, returned again while their
+ * inputs are unchanged (hooks/renderMemo.ts). When the engine redraws on its
+ * own (as when a click gives the pane the keyboard), every Button keeps its
+ * press handle, so that click still lands. `redraw` clears it.
+ */
+const drawn = newRenderMemo()
+
+/** What the git half of the screen shows: not when git was read, only whether it has been and what it found. */
+function gitKeyOf(state: G.GitState): string {
+  if (gitKeyMemo?.of === state) return gitKeyMemo.key
+  const files = F.hash(state.files.map(file => `${file.code}${file.path}\t${file.added}\t${file.removed}`).join('\n'))
+  const key = [
+    state.isRepo,
+    state.checkedAt > 0,
+    state.root,
+    state.branch,
+    state.head,
+    state.upstream,
+    state.ahead,
+    state.behind,
+    state.files.length,
+    state.added,
+    state.removed,
+    files,
+    state.error ?? '',
+    state.pinned,
+    state.repos.map(repo => repo.root).join(','),
+    state.isCwdRepo,
+    state.nearby.map(repo => repo.root).join(','),
+    state.commits.length,
+    state.today.commits,
+    state.today.added,
+    state.today.removed,
+    state.sessionCommits,
+  ].join('|')
+  gitKeyMemo = { of: state, key }
+  return key
+}
+
+/**
+ * Everything on screen, as one key: all that the v2 state shows, built
+ * afresh (`W.v2KeyOf`: the header, needs, tree, plan, chat, changes, Inspect
+ * and acks, every age and elapsed time as worded); git as the Changes tab
+ * reads it (whether read, HEAD, branch, files and counts); how the web deck
+ * stands; and the sample's own state while it shows. Equal keys draw the
+ * same screen.
+ */
+function screenKey(now: number): string {
+  v2Of(now, true)
+  const shown = webPaneOf()
+  const webKey = `${shown.status}\t${shown.url}\t${shown.opened}\t${shown.note}`
+  const sample = view.isDemo ? [demo.version, demo.v2 !== null, demo.note, clearedKey()].join('|') : ''
+  return [v2Memo.shows, gitKeyOf(currentGit()), webKey, sample, SR.registryKey()].join('\n\u0001')
+}
+
+/**
+ * Redraws only when the screen would change: how events, the timer and the
+ * background reads draw, so nothing moves while nothing changes. (A press
+ * that changes the view draws unasked, through `changed`.) A change is the
+ * web deck's signal too: its state is written again.
+ */
+export function redrawIfChanged($: EngineInterface, now: number) {
+  const key = screenKey(now)
+  if (key === shownKey) return
+  shownKey = key
+  scheduleWeb($)
+  SR.noteChanged(now)
+  redraw($)
+}
+
+/** What Claude Code showed of a step's thinking as it streamed, read from its chunks: their text, and the block the last came in. */
+type Thinking = { text: string; block: number }
+
+/** Appends a thinking chunk's text to the step's text so far, with a blank line before a new block. Once the text passes `M.LIMITS.wordChars` (the most a kept word holds), later chunks are ignored. */
+function keepThinking(kept: Thinking, chunk: { index: number; text: string }): void {
+  if (kept.text.length > M.LIMITS.wordChars) return
+  if (kept.block !== -1 && chunk.index !== kept.block && kept.text !== '') kept.text += '\n\n'
+  kept.block = chunk.index
+  kept.text += chunk.text
+}
+
+/** An event changed the data: keep it, and draw if the screen would change. Whatever it brought that the deck could stop is put to Claude Code's permission check at once (`probeStops`), so its Stop shows with it. */
+function touched($: EngineInterface, now: number) {
+  save($)
+  redrawIfChanged($, now)
+  probeStops($, now)
+}
+
+/** Inspect's read of the context put off (./inspectHooks reads it at most every 10 s). */
+let inspectTimer: Timer | undefined
+
+/** Inspect: the context's breakdown read again, now when the last read was 10 s ago or more, else once that has passed. */
+async function readContextSoon($: EngineInterface): Promise<void> {
+  try {
+    const wait = contextWaitOf(await $.clock.now())
+    if (wait > 0) {
+      if (!inspectTimer) {
+        inspectTimer = $.clock.after(wait, () => {
+          inspectTimer = undefined
+          void readContextSoon($)
+        })
+      }
+      return
+    }
+    if (await readInspectContext($, data)) touched($, await $.clock.now())
+  } catch {
+    // Inspect's context is read again at the next measure
+  }
+}
+
+/** Inspect: what is loaded (the model, the output style, the settings' hooks), then the context, read now. */
+async function readInspected($: EngineInterface): Promise<void> {
+  try {
+    if (await readInspectLoaded($, data)) touched($, await $.clock.now())
+    if (await readInspectContext($, data)) touched($, await $.clock.now())
+  } catch {
+    // Inspect shows what it had
+  }
+}
+
+
+/**
+ * Each directory edited in as the file system spells it, by `R.keyOf`:
+ * `$.fs.stat(dir, { resolve: true }).realPath`, so an 8.3 short name
+ * (`C:\Users\DEVELO~1`) reads as git prints it (`C:/Users/developer`).
+ */
+const realDirs = new Map<string, string>()
+
+/** `abs` with its directory spelled as the file system resolves it; asked once per directory, the spelling given when it cannot be. */
+async function realPathOf($: EngineInterface, abs: string): Promise<string> {
+  const path = R.cleanPath(abs)
+  if (!R.isAbsolute(path)) return path
+  const dir = R.dirOf(path)
+  const key = R.keyOf(dir)
+  let real = realDirs.get(key)
+  if (real === undefined) {
+    try {
+      const stat = await $.fs.stat(dir, { resolve: true })
+      real = stat.realPath ? R.cleanPath(stat.realPath) : dir
+      realDirs.set(key, real)
+    } catch {
+      return path
+    }
+  }
+  return R.childOf(real, F.baseName(path))
+}
+
+/** The same from what is resolved already, with no file system call: for the instant a call starts. */
+function knownRealOf(abs: string): string {
+  const path = R.cleanPath(abs)
+  const real = R.isAbsolute(path) ? realDirs.get(R.keyOf(R.dirOf(path))) : undefined
+  return real === undefined ? path : R.childOf(real, F.baseName(path))
+}
+
+/** Whether `knownRealOf` can spell `abs` as the file system does already: a relative path, or one whose directory was resolved. */
+function isSpelledOf(abs: string): boolean {
+  const path = R.cleanPath(abs)
+  return !R.isAbsolute(path) || realDirs.has(R.keyOf(R.dirOf(path)))
+}
+
+/**
+ * A call that started in a directory not resolved yet (an 8.3 short name,
+ * `C:\Users\DEVELO~1\…`, which git never prints) gets its target written
+ * again once the file system spells the path: relative to the repository
+ * like every later call there, never an absolute path cut from the left.
+ */
+async function respell($: EngineInterface, activity: DeckActivity, tool: string, input: Record<string, unknown>, file: string): Promise<void> {
+  try {
+    const real = await realPathOf($, file)
+    const target = M.targetOf(tool, { ...input, file_path: real }, currentGit().root || null, data.board)
+    if (target === activity.target) return
+    activity.target = target
+    touched($, await $.clock.now())
+  } catch {
+    // the target keeps the spelling the call gave
+  }
+}
+
+/** A slash command's expansion (classic UserPromptExpansion), held for the prompt it becomes: its headline. */
+let expansion: { headline: string; at: number } | null = null
+
+/** A slash command submitted alone, before its expansion (if any) arrives: an expansion makes it a request. */
+let pendingCommand: { text: string; origin: { kind: string; asUser?: unknown }; turnId?: string; at: number } | null = null
+
+/**
+ * A submitted prompt whose turn may still start: its text, whether the words
+ * are the user's own, whether it was submitted during a running turn, whether
+ * its submit has resolved, and the slash command it runs as typed ("/review
+ * the diff"), when the engine said it runs one.
+ */
+type Submitted = { text: string; isTheirs: boolean; isQueued: boolean; isSettled: boolean; command?: string }
+
+/**
+ * The submitted prompts whose turn may still start, newest last (at most 20).
+ * The engine starts a prompt's turn inside `prompt.submit`'s `next(e)`, so
+ * `turn.start` fires before the submit hook resumes. Each prompt is noted
+ * before `next(e)`, and the turn it starts finds it by its text. (Noted after
+ * `next(e)`, a turn matched the prompt before its own: after a notification's
+ * turn, your next prompt was treated as having no words of yours.)
+ */
+const submitted: Submitted[] = []
+
+/** Notes a submitted prompt before its turn can start. A prompt submitted while the session is idle starts its turn at once, so any earlier idle-submitted entry still left (a local command's, which starts no turn) is dropped. */
+function noteSubmitted(text: string, isTheirs: boolean, isQueued: boolean, command: string): Submitted {
+  if (!isQueued) for (let i = submitted.length - 1; i >= 0; i--) if (submitted[i]?.isQueued === false) submitted.splice(i, 1)
+  const entry: Submitted = { text: text.trim(), isTheirs, isQueued, isSettled: false, ...(command ? { command } : {}) }
+  submitted.push(entry)
+  if (submitted.length > 20) submitted.splice(0, submitted.length - 20)
+  return entry
+}
+
+/** Lets a prompt go whose turn will never start: a hook dropped it. */
+function dropSubmitted(entry: Submitted) {
+  const at = submitted.indexOf(entry)
+  if (at >= 0) submitted.splice(at, 1)
+}
+
+/**
+ * Finds and removes the prompt a main-loop turn starts with: the newest one
+ * submitted with the same text; failing that (a hook may have rewritten the
+ * text), the newest one submitted while idle whose submit is still under
+ * way. Undefined for a turn with no prompt.submit before it (one started by
+ * a background task's notification).
+ */
+function takeSubmitted(text: string): Submitted | undefined {
+  const said = text.trim()
+  let at = -1
+  for (let i = submitted.length - 1; i >= 0 && at < 0; i--) if (submitted[i]?.text === said) at = i
+  for (let i = submitted.length - 1; i >= 0 && at < 0; i--) if (submitted[i]?.isQueued === false && submitted[i]?.isSettled === false) at = i
+  return at < 0 ? undefined : submitted.splice(at, 1)[0]
+}
+
+/**
+ * Your prompts typed during a running main-loop turn, logged when they were
+ * submitted (`prompt.submit` with that turn's `turnId`). If the engine later
+ * runs one as a turn of its own, that turn does not log it again. The
+ * newest 20.
+ */
+const typedMidTurn: string[] = []
+
+/** A prompt of yours logged as you typed it over a running turn: kept for the turn it may start. */
+function noteTypedMidTurn(text: string) {
+  const said = text.trim()
+  if (said === '') return
+  typedMidTurn.push(said)
+  if (typedMidTurn.length > 20) typedMidTurn.splice(0, typedMidTurn.length - 20)
+}
+
+/**
+ * Whether a main-loop turn starts with prompts you typed during the turn
+ * before, which were logged then (its text is one of them, or several queued
+ * together). Matches are removed, so each is logged only once.
+ */
+function takeTypedMidTurn(text: string): boolean {
+  const said = text.trim()
+  if (said === '' || typedMidTurn.length === 0) return false
+  const at = typedMidTurn.indexOf(said)
+  if (at >= 0) {
+    typedMidTurn.splice(at, 1)
+    return true
+  }
+  // several queued prompts can start one turn together
+  const within = typedMidTurn.filter(one => said.includes(one))
+  if (within.length < 2 || within.reduce((rest, one) => rest.replace(one, ''), said).trim() !== '') return false
+  for (const one of within) typedMidTurn.splice(typedMidTurn.indexOf(one), 1)
+  return true
+}
+
+/**
+ * SendMessage calls under way, each with its own `summary` (the label Claude
+ * gives its own transcript row): the row their `session.send` logs takes it
+ * as its title. Let go when the call ends.
+ */
+const sendTitles: { id: string; from: string; text: string; summary: string }[] = []
+
+/**
+ * The sends under way (`session.send` before its `next(e)` resolves), each
+ * with its recipient and text. A send that wakes a finished agent raises
+ * that agent's resume inside it, and only the send logs the message.
+ */
+const sendsInFlight: { from: string; to: string; text: string }[] = []
+
+/** The message rows a resume logged for want of a send under way, by id, the newest 20: a send of the same words after it is that one row. */
+const resumeRows: string[] = []
+
+/**
+ * A resumed agent's waking words, one message: the send under way to it (or
+ * just logged) logs them; with none, the resume does, from the sender its
+ * envelope names (`<agent-message from="…">`, an agent's SendMessage), else
+ * from `from`. The envelope comes off first, as the send never carried it.
+ */
+function logResumeWords(agent: DeckAgent, from: string, prompt: string, at: number) {
+  const unwrapped = M.unwrapMessage(prompt)
+  const words = unwrapped.text
+  if (words.trim() === '') return
+  const isSent = sendsInFlight.some(one => one.text.trim() === words.trim() && (one.to === agent.id || M.resolveRecipient(data, one.to)?.id === agent.id))
+  if (isSent || M.loggedSendOf(data, { to: agent.id, text: words, at })) return
+  const sender = unwrapped.from ? (M.resolveRecipient(data, unwrapped.from)?.id ?? F.trunc(F.oneLine(unwrapped.from), 120)) : from
+  const row = M.addMessage(data, { from: sender, to: agent.id, kind: 'message', text: words, at })
+  resumeRows.push(row.id)
+  if (resumeRows.length > 20) resumeRows.splice(0, resumeRows.length - 20)
+}
+
+/** The summary of the SendMessage under way that sends `text` from loop `from`; '' for none. */
+function sendTitleOf(from: string, text: string): string {
+  const sent = F.oneLine(text)
+  const found = sendTitles.find(one => one.from === from && (one.text === text || (F.oneLine(one.text) !== '' && sent.includes(F.oneLine(one.text).slice(0, 80)))))
+  return found?.summary ?? ''
+}
+
+/** Keeps the model in `$.state`, so a reload of this module picks it up again; while the debug folder is there, dumps it too, and while the web deck is on, writes its state. */
+export function save($: EngineInterface) {
+  dataGen += 1
+  scheduleDump($)
+  scheduleWeb($)
+  if (timers.save) return
+  timers.save = $.clock.after(1500, () => {
+    timers.save = undefined
+    void $.state.set(SNAPSHOT, M.copyOf({ v: M.SNAPSHOT_VERSION, data, view })).catch(() => undefined)
+  })
+}
+
+/**
+ * The debug dump: while `<home>/debug/` exists (the person makes it), what
+ * the live deck believes goes to `debug/<sessionId>.json` in Eagle Eye's home
+ * about 2 s after the data changes, for a person to read without a
+ * screenshot, each session to its own file, made 0600 in a folder made 0700
+ * before the first write. The folder is looked for at session.start and on
+ * each tick, and again right before each write: with it absent nothing is
+ * written (`$.fs.write` would make it).
+ */
+const DUMP_MS = 2000
+const debug = { isOn: false, loadedAt: 0, writes: 0, isPrivate: false }
+
+/** The debug folder, `<home>/debug`; '' with no home. */
+async function debugDirOf($: EngineInterface): Promise<string> {
+  const at = await homeOf($)
+  return at === '' ? '' : `${at}/${W.DEBUG_DIR}`
+}
+
+/** Whether the debug folder is there; a look that fails counts as absent. */
+async function hasDebugDir($: EngineInterface): Promise<boolean> {
+  try {
+    const dir = await debugDirOf($)
+    return dir !== '' && (await $.fs.exists(dir)) === true
+  } catch {
+    return false
+  }
+}
+
+/** Looks for the debug folder again: one that appeared since the last look dumps soon, one gone stops the dump. */
+async function checkDebug($: EngineInterface, isStart = false): Promise<void> {
+  const was = debug.isOn
+  debug.isOn = await hasDebugDir($)
+  if (!debug.isOn) {
+    timers.dump?.cancel()
+    timers.dump = undefined
+  } else if (!was && !isStart) {
+    scheduleDump($)
+  }
+}
+
+/** The data changed: a dump within about 2 s while the debug folder is there; changes meanwhile ride along. */
+function scheduleDump($: EngineInterface) {
+  if (!debug.isOn || timers.dump) return
+  timers.dump = $.clock.after(DUMP_MS, () => {
+    timers.dump = undefined
+    void writeDump($)
+  })
+}
+
+async function writeDump($: EngineInterface): Promise<void> {
+  try {
+    if (!(await hasDebugDir($))) {
+      debug.isOn = false
+      return
+    }
+    const now = await $.clock.now()
+    const name = W.fileNameOf(sessionId || 'state')
+    // the dump's file made 0600 (its folder 0700) before its first write: the engine's write keeps that mode
+    if (!debug.isPrivate) debug.isPrivate = await runHome($, { op: 'prepare', home: homeDir(), id: name, files: [`${W.DEBUG_DIR}/${name}.json`], isOwnHome: isOwnHome() })
+    if (!debug.isPrivate) return
+    debug.writes += 1
+    const state = { meta: { at: now, loadedAt: debug.loadedAt, writes: debug.writes }, ...debugStateOf(now) }
+    await $.fs.write(`${await debugDirOf($)}/${name}.json`, `${JSON.stringify(state, null, 2)}\n`)
+  } catch {
+    // a dump that could not be written waits for the next change
+  }
+}
+
+/**
+ * What the deck believes now, as plain data, nothing in it made up: the raw
+ * counts; git; the view (v2's own, and the pane's focus); the pane's window
+ * (the list of sessions, Chat's end, the moves asked for); from the v2 state
+ * every surface draws (`v2Of`), its header, needs, plan sources, latest chat
+ * rows and tree; per loop what Claude Code gave it (its name, description,
+ * type, origin, status, parent, background flag, calls, list and result);
+ * the latest edits; and how the web deck stands (never its secret or a link).
+ */
+function debugStateOf(now: number) {
+  const state = v2Of(now)
+  const callOf = (call: DeckActivity) => `${call.tool} ${F.oneLine(call.command || call.target)}`.trim()
+  return {
+    counts: {
+      agents: data.agents.length,
+      shownAgents: data.agents.filter(M.isShownAgent).length,
+      messages: data.messages.length,
+      edits: data.edits.length,
+      files: Object.keys(data.files).length,
+      goals: data.goals.length,
+      board: Object.keys(data.board).length,
+      workflows: data.workflows.length,
+      turns: data.turns,
+    },
+    git: { root: currentGit().root, isRepo: currentGit().isRepo, checkedAt: currentGit().checkedAt, files: currentGit().files.map(file => file.path) },
+    view: { page: view.page, v2: view.v2, focus: paneFocus, isDemo: view.isDemo },
+    // how the pane's window stands for the deck: whether the list of sessions shows, Chat's end kept to, and the moves the deck asked for
+    pane: { isListOpen: SR.isListOpen(), follow: { ...chatFollow }, moves: paneMoves.count, latest: paneMoves.latest },
+    // what every surface draws, as v2 has it: the header (your latest request, the word, the turn), what needs you, the plan's sources, the chat's latest rows
+    header: state.header,
+    needs: state.needs.map(need => ({ id: need.id, kind: need.kind, agent: need.agent, age: need.age, text: F.trunc(F.oneLine(need.text), 200), isAnswerable: need.isAnswerable })),
+    plan: state.plan
+      ? { board: state.plan.board.map(task => `${task.id} ${task.status}: ${task.subject}`), todos: state.plan.todos?.items.map(item => `${item.status}: ${item.text}`) ?? null, approved: state.plan.approved !== null, workflows: state.plan.workflows.map(run => `${run.name}: ${run.phases.join(' · ')}`) }
+      : null,
+    // each loop as Claude Code gave it: its words, its status, its parent, its calls
+    agents: data.agents.map(agent => ({
+      id: agent.id,
+      kind: agent.kind,
+      name: agent.name,
+      description: agent.description,
+      type: agent.type,
+      origin: M.originOf(agent),
+      status: agent.status,
+      parent: M.parentIdOf(data, agent) ?? null,
+      background: agent.background ?? null,
+      current: agent.current ? callOf(agent.current) : null,
+      recent: agent.recent.slice(-3).map(callOf),
+      todos: (agent.todos ?? []).map(item => `${item.status}: ${item.text}`),
+      answer: agent.answer === undefined ? null : agent.answer.slice(0, 200),
+      resultVia: agent.resultVia ?? null,
+      tools: agent.tools,
+      files: agent.files,
+    })),
+    edits: data.edits.slice(-20).map(edit => ({ agent: edit.agent, tool: edit.tool, path: edit.path, added: edit.added, removed: edit.removed })),
+    chat: state.chat.slice(-20).map(row => ({ from: row.from, to: row.to, who: row.who, kind: row.kind, ...(row.title ? { title: row.title } : {}), text: F.oneLine(row.text).slice(0, 80) })),
+    tree: state.agents.map(row =>
+      row.row === 'fold'
+        ? { row: row.row, id: row.id, depth: row.depth, text: row.text, ids: row.ids }
+        : { row: row.row, id: row.id, depth: row.depth, title: row.title, kind: row.kind, status: row.status, fold: row.fold, live: row.live ? `${row.live.tool} ${row.live.text}` : null, needs: row.needs },
+    ),
+    web: webDebugOf(),
+    // what waits on you, and whether the page may answer it; what came of the page's latest commands
+    pending: data.pending.map(item => ({ ...item, isAnswerable: askers.has(item.id) })),
+    acks: data.acks.slice(-10),
+  }
+}
+
+
+/**
+ * A page command, checked against the model (`W.routeOf`) and acted on, its
+ * ack under its `id`: the page's own, and one another session's deck sent
+ * (`steerFromSession`), alike. Refused, its ack says why.
+ */
+export function runCommand($: EngineInterface, cmd: Record<string, unknown>) {
+  const ackId = W.cmdIdOf(cmd)
+  const route = W.routeOf(cmd, data)
+  if (route === null) void ack($, ackId, 'failed', W.refusalOf(cmd, data))
+  else if (route.kind === 'chat') void sendChat($, route.agentId, route.text, ackId)
+  else if (route.kind === 'review') void sendReview($, route.text, ackId)
+  else if (route.kind === 'answer') answerCall($, route.callId, route.answers, ackId)
+  // Stop, Stop turn and Cancel: only through Claude Code's own channels (TaskStop, CronDelete, $.turn.abort)
+  else if (route.kind === 'stopAgent') void stopAgent($, route.agentId, ackId)
+  else if (route.kind === 'abortTurn') void abortTurn($, route.turnId, ackId)
+  else if (route.kind === 'stopBackground') void stopBackground($, route.bgId, ackId)
+  else if (route.kind === 'avatarStyle') {
+    setAvatarStyle($, route.style)
+    void ack($, ackId, 'delivered', `Avatars: ${AV.styleName(route.style)}`)
+  } else if (route.kind === 'clearFinished') void clearFinished($, ackId)
+  else if (route.kind === 'showCleared') void showCleared($, ackId)
+  else if (route.kind === 'selectRepo') void repoFromPage($, route.root, ackId)
+}
+
+/**
+ * The page's pick in Changes (`selectRepo`): a repository the deck offers
+ * (one of the picks in the session's directory, or one it found agents
+ * editing in) pinned, or '' to follow the work again; any other is refused.
+ */
+async function repoFromPage($: EngineInterface, root: string, ackId: string): Promise<void> {
+  const offered = [...currentGit().nearby, ...currentGit().repos].find(one => R.sameRoot(one.root, root))
+  if (root !== '' && !offered) {
+    void ack($, ackId, 'failed', 'Not a repository Changes offers here')
+    return
+  }
+  const why = await chooseRepo($, offered?.root ?? '')
+  void ack($, ackId, why === '' ? 'delivered' : 'failed', why || (offered ? `Changes shows ${offered.name}` : 'Changes follows the work again'))
+}
+
+/** Keeps the person's own settings in the store (`prefs`), for every session: the band hidden or not, and the avatar style. */
+export function savePrefs($: EngineInterface) {
+  void $.store.set('prefs', { isBandHidden: view.isBandHidden, avatarStyle: view.avatarStyle }).catch(() => undefined)
+}
+
+/**
+ * Draws the agents' avatars in `style` (web/avatars.mjs `STYLE_IDS`; one it
+ * does not know is let go): kept in the person's prefs, so it holds in every
+ * session; the pane draws again, and the web page follows with the state it
+ * is written next (its `avatarStyle`).
+ */
+export function setAvatarStyle($: EngineInterface, style: string) {
+  if (!AV.isStyle(style) || style === view.avatarStyle) return
+  view.avatarStyle = style
+  savePrefs($)
+  changed($)
+}
+
+
+/** Says what came of the page's command `id` in the state it reads (`acks`); a command with no id is told nothing. */
+export async function ack($: EngineInterface, id: string, status: DeckAck['status'], text: string): Promise<void> {
+  if (id === '') return
+  try {
+    const now = await $.clock.now()
+    M.noteAck(data, { id, ok: status !== 'failed', status, text, at: now })
+    touched($, now)
+  } catch {
+    // the page goes on without the word
+  }
+}
+
+// Stop: the deck stops only through Claude Code's own channels, and never grants itself a permission.
+
+/** The stopping calls whose verdict is being asked for now, by their key: one question each at a time. */
+const probing = new Set<string>()
+
+/** When the permission check itself last failed for a stopping call, by its key: asked again only CHECK_RETRY_MS later. */
+const checkFailedAt = new Map<string, number>()
+
+/** How long after a permission check that failed (it rejects inside a turn being stopped) the deck asks again. */
+const CHECK_RETRY_MS = 5_000
+
+/**
+ * Asks Claude Code's permission check about every stopping call the deck
+ * could make whose verdict is missing or old (`B.staleCallsOf`): TaskStop of
+ * a background agent, a teammate or a background task, CronDelete of a
+ * schedule. `$.tool.check` runs nothing, opens no dialog and asks no
+ * classifier. Each verdict is kept (`B.noteVerdict`); Stop and Cancel show
+ * only where it is `allow`.
+ */
+function probeStops($: EngineInterface, now: number): void {
+  for (const call of B.staleCallsOf(data, now)) {
+    if (probing.has(call.key) || now - (checkFailedAt.get(call.key) ?? -Infinity) < CHECK_RETRY_MS) continue
+    probing.add(call.key)
+    void verdictOf($, call).finally(() => probing.delete(call.key))
+  }
+}
+
+/**
+ * Claude Code's permission check on stopping call `call`, asked now and
+ * kept. A check that fails (it rejects inside a turn being stopped) is no
+ * verdict of Claude Code's: nothing is kept, the Stop stays as it was, it is
+ * asked again soon, and what it said is answered as `failed`.
+ */
+async function verdictOf($: EngineInterface, call: B.StopCall): Promise<{ decision: 'allow' | 'ask' | 'deny'; reason?: string } | { failed: string }> {
+  let verdict: { decision: 'allow' | 'ask' | 'deny'; reason?: string }
+  try {
+    const said = await $.tool.check({ tool: call.tool, input: call.input })
+    verdict = { decision: said.decision, ...(said.reason ? { reason: said.reason } : {}) }
+    checkFailedAt.delete(call.key)
+  } catch (error) {
+    try {
+      checkFailedAt.set(call.key, await $.clock.now())
+    } catch {
+      // asked again at the next change
+    }
+    return { failed: firstSentenceOf(error instanceof Error ? error.message : String(error)) }
+  }
+  try {
+    const now = await $.clock.now()
+    if (B.noteVerdict(data, call.key, verdict, now)) touched($, now)
+  } catch {
+    // the verdict holds for this press whatever the deck keeps of it
+  }
+  return verdict
+}
+
+/**
+ * Runs stopping call `call` through Claude Code's own tool (`$.tool.call`:
+ * its hooks, its permission check, then the tool), once its permission
+ * check, asked again now, allows it; never with a consent of the deck's
+ * own. Answers '' when it ran, else why not, in a sentence.
+ */
+async function runStop($: EngineInterface, call: B.StopCall): Promise<string> {
+  const verdict = await verdictOf($, call)
+  if ('failed' in verdict) return `Could not ask Claude Code whether ${call.tool} is allowed${verdict.failed ? `: ${verdict.failed.replace(/[.!?]+$/, '')}` : ''}. Try again in a moment`
+  if (verdict.decision !== 'allow') return B.stopOf(data, call.tool, call.id).why
+  try {
+    const ran = await $.tool.call({ tool: call.tool, ...call.input } as unknown as Parameters<EngineInterface['tool']['call']>[0])
+    if (ran.deny !== undefined) return `Claude Code refused ${call.tool}: ${firstSentenceOf(ran.deny) || 'no reason given'}`
+    if (ran.isError === true) return `${call.tool} failed: ${firstSentenceOf(typeof ran.text === 'string' ? ran.text : '') || 'no reason given'}`
+    return ''
+  } catch (error) {
+    return `${call.tool} failed: ${firstSentenceOf(error instanceof Error ? error.message : String(error)) || 'no reason given'}`
+  }
+}
+
+/** A stop the deck could not make: the page's command and a toast say why. */
+async function stopFailed($: EngineInterface, ackId: string, why: string): Promise<void> {
+  $.ui.toast(why)
+  await ack($, ackId, 'failed', why)
+}
+
+/**
+ * Stop on a background agent or a teammate at work: Claude Code's own
+ * TaskStop of it (`runStop`). Then its row ends as stopped, Chat says "You
+ * stopped builder", and the page's command is told.
+ */
+async function stopAgent($: EngineInterface, agentId: string, ackId = ''): Promise<void> {
+  const agent = M.agentOf(data, agentId)
+  if (!agent || !B.isStoppableAgent(agent)) return stopFailed($, ackId, W.refusalOf({ cmd: 'stopAgent', agentId }, data))
+  const name = W.rowTitleOf(agent)
+  const why = await runStop($, B.stopCallOf('TaskStop', agent.id))
+  if (why !== '') return stopFailed($, ackId, why)
+  const now = await $.clock.now()
+  if (M.isLive(agent.status)) {
+    agent.status = 'killed'
+    agent.endedAt = now
+    delete agent.current
+    delete agent.todo
+  }
+  M.addMessage(data, { from: M.YOU, to: agent.id, kind: 'stop', text: `You stopped ${name}`, at: now, ...(ackId ? { ackId } : {}) })
+  $.ui.toast(`Stopped ${name}`)
+  await ack($, ackId, 'delivered', `Stopped ${name}`)
+  touched($, now)
+}
+
+/**
+ * Stop turn: Claude Code's own `$.turn.abort` of the main loop's running
+ * turn, as Esc does (an op: no permission is asked or granted); the
+ * foreground agents end with it. Then Chat says "You stopped the turn".
+ */
+async function abortTurn($: EngineInterface, turnId: string, ackId = ''): Promise<void> {
+  if (turnId === '' || data.mainTurnId !== turnId) return stopFailed($, ackId, data.mainTurnId === undefined ? 'No turn is running' : 'That turn has ended')
+  try {
+    await $.turn.abort({ turnId })
+  } catch (error) {
+    return stopFailed($, ackId, `Could not stop the turn: ${firstSentenceOf(error instanceof Error ? error.message : String(error)) || 'Claude Code refused'}`)
+  }
+  const now = await $.clock.now()
+  M.addMessage(data, { from: M.YOU, to: M.MAIN, kind: 'stop', text: 'You stopped the turn', at: now, ...(ackId ? { ackId } : {}) })
+  $.ui.toast('Stopped the turn')
+  await ack($, ackId, 'delivered', 'Stopped the turn')
+  touched($, now)
+}
+
+/**
+ * Stop on a background shell, monitor or workflow (Claude Code's own
+ * TaskStop), or Cancel on a cron or wakeup (its CronDelete), by the row's
+ * `bgId` (`runStop`). Then its row goes, Chat says "You stopped npm run
+ * dev" or "You cancelled …", and the page's command is told.
+ */
+async function stopBackground($: EngineInterface, bgId: string, ackId = ''): Promise<void> {
+  const row = B.rowByBgId(data, bgId)
+  if (!row) return stopFailed($, ackId, W.refusalOf({ cmd: 'stopBackground', bgId }, data))
+  const call = B.stopCallOfRow(row)
+  const name = B.rowNameOf(row)
+  const by = row.by
+  const why = await runStop($, call)
+  if (why !== '') return stopFailed($, ackId, why)
+  const now = await $.clock.now()
+  B.noteEnd(data, { toolUseId: '', tool: call.tool, input: call.input, by: '', at: now, ok: true, result: null })
+  const said = `You ${call.tool === 'CronDelete' ? 'cancelled' : 'stopped'} ${name}`
+  M.addMessage(data, { from: M.YOU, to: '', kind: 'stop', text: said, at: now, ...(by ? { agent: by } : {}), ...(ackId ? { ackId } : {}) })
+  $.ui.toast(said.replace(/^You s/, 'S').replace(/^You c/, 'C'))
+  await ack($, ackId, 'delivered', said.replace(/^You s/, 'S').replace(/^You c/, 'C'))
+  touched($, now)
+}
+
+/** Claude Code's snapshot of the background work that a Stop or SubagentStop carried (`background_tasks`, `session_crons`), taken at `at`, kept (`B.noteSnapshot`); whether the record changed. */
+function noteBackground(e: { background_tasks?: unknown; session_crons?: unknown }, at: number): boolean {
+  return B.noteSnapshot(data, { tasks: e.background_tasks, crons: e.session_crons, at, agents: new Set(data.agents.map(agent => agent.id)) })
+}
+
+
+/**
+ * Puts Review's request in the prompt box after what you had typed there,
+ * read first so it stays (`W.reviewFillOf`: a blank line between; into an
+ * empty box, as it is). The draft is read for this alone and kept nowhere.
+ */
+async function fillAfterDraft($: EngineInterface, text: string): Promise<Awaited<ReturnType<EngineInterface['prompt']['fill']>>> {
+  let draft = ''
+  try {
+    draft = (await $.prompt.read()).text
+  } catch {
+    // no box to read: it takes the request as it is
+  }
+  return $.prompt.fill(W.reviewFillOf(draft, text))
+}
+
+/** Puts a review request in the prompt box, for the person to send (the pane's Review), what they had typed kept. */
+function fillReview($: EngineInterface, text: string) {
+  void fillAfterDraft($, text)
+    .then(filled => $.ui.toast(filled.isFilled ? 'The review request is in your prompt; press Enter to send it.' : 'Could not fill the prompt.'))
+    .catch(() => $.ui.toast('Could not fill the prompt.'))
+}
+
+/**
+ * The page's Review, which it asked you to confirm: the request goes in the
+ * prompt box where there is one (the terminal), after what you had typed
+ * there, for you to send. Where the
+ * surface draws its own composer (the Desktop app: `no_composer`) it goes to
+ * the Orchestrator as your next prompt, which runs once Claude is free.
+ */
+async function sendReview($: EngineInterface, text: string, ackId: string): Promise<void> {
+  let filled: Awaited<ReturnType<EngineInterface['prompt']['fill']>> | undefined
+  try {
+    filled = await fillAfterDraft($, text)
+  } catch {
+    filled = undefined
+  }
+  const said = W.reviewStepOf(filled)
+  if (said.kind === 'filled') {
+    $.ui.toast('The review request is in your prompt; press Enter to send it.')
+    await ack($, ackId, 'delivered', 'In your prompt box: press Enter to send it')
+  } else if (said.kind === 'queue') {
+    const isBusy = M.agentOf(data, M.MAIN)?.status === 'running'
+    await queueForMain($, text, ackId, { status: 'queued', text: isBusy ? 'Claude reviews it when it finishes its current turn' : 'Claude reviews it now' })
+    $.ui.toast(isBusy ? 'Review queued: Claude reviews the changes when it finishes its current turn.' : 'Review sent: Claude reviews the changes now.')
+  } else {
+    $.ui.toast('Could not fill the prompt.')
+    await ack($, ackId, 'failed', said.why)
+  }
+}
+
+/**
+ * Prompts the deck submitted to the Orchestrator in your words. Each was
+ * logged as your message when sent, so the turn it starts does not log it
+ * again. Each is marked once its `prompt.submit` passes with the deck's own
+ * origin.
+ */
+const deckPrompts: { text: string; isSubmitted: boolean }[] = []
+
+/**
+ * Your words to the Orchestrator from the deck: logged at once as your
+ * message (its ack `told`: queued while Claude works, saying when it reads
+ * them; delivered while it is idle), then submitted as your next prompt
+ * (`asUser`: the model reads them bare), which runs once the session is
+ * idle. A prompt a hook drops, or one that cannot be queued, fails its ack.
+ */
+async function queueForMain($: EngineInterface, text: string, ackId: string, told: { status: 'queued' | 'delivered'; text: string }): Promise<void> {
+  const said = text.trim()
+  const now = await $.clock.now()
+  M.addMessage(data, { from: M.YOU, to: M.MAIN, kind: 'chat', text: said, at: now, ...(ackId ? { ackId } : {}) })
+  const entry = { text: said, isSubmitted: false }
+  deckPrompts.push(entry)
+  if (deckPrompts.length > 20) deckPrompts.splice(0, deckPrompts.length - 20)
+  await ack($, ackId, told.status, told.text)
+  touched($, now)
+  const forget = () => {
+    const at = deckPrompts.indexOf(entry)
+    if (at >= 0) deckPrompts.splice(at, 1)
+  }
+  void $.prompt.submit({ text: said, asUser: true }).then(
+    result => {
+      if (result.drop === undefined) return
+      forget()
+      void ack($, ackId, 'failed', `Not sent: ${F.trunc(F.oneLine(result.drop), 200)}`)
+    },
+    error => {
+      forget()
+      const why = error instanceof Error ? error.message : String(error)
+      $.ui.toast(`Could not queue the prompt: ${why}`)
+      void ack($, ackId, 'failed', `Could not queue it: ${F.trunc(F.oneLine(why), 200)}`)
+    },
+  )
+}
+
+/** The deck's prompt that `prompt.submit` passed with the deck's own origin and these words: marked, for its turn to know it. */
+function markDeckPrompt(text: string) {
+  const entry = deckPrompts.find(one => !one.isSubmitted && one.text === text.trim())
+  if (entry) entry.isSubmitted = true
+}
+
+/** Whether a turn starts with one of the deck's own prompts (a marked one first, else any with the same text); if so it is removed, since it was logged already. */
+function takeDeckPrompt(text: string): boolean {
+  const said = text.trim()
+  if (said === '') return false
+  const marked = deckPrompts.findIndex(one => one.isSubmitted && one.text === said)
+  const at = marked >= 0 ? marked : deckPrompts.findIndex(one => one.text === said)
+  if (at < 0) return false
+  deckPrompts.splice(at, 1)
+  return true
+}
+
+async function restore($: EngineInterface, now: number): Promise<boolean> {
+  try {
+    const { value } = await $.state.get(SNAPSHOT)
+    if (value && value.v === M.SNAPSHOT_VERSION) {
+      data = M.healData(M.copyOf(value.data), now)
+      B.heal(data)
+      // healView builds a fresh view from the snapshot's fields: one missing or unknown takes its default
+      view = M.healView(value.view, data)
+      return true
+    }
+  } catch {
+    // a missing or unreadable snapshot starts the deck over
+  }
+  return false
+}
+
+
+/**
+ * The agents you messaged from the deck and are awaiting a reply from, by
+ * id: when the message was sent (`since`), and whether one of their steps
+ * has started since (`isRead`: they had the chance to read it). The first
+ * step started after the message that says anything is the reply; if a run
+ * read it and ended without a word for you, the entry is dropped. A reload
+ * forgets them.
+ */
+const replies = new Map<string, { since: number; isRead: boolean }>()
+
+/**
+ * Your message to an agent, from the pane's Talk or the page's: to the
+ * Orchestrator, logged and queued as your next prompt (`queueForMain`); to a
+ * subagent or teammate, delivered to its inbox (`$.session.send`): it reads
+ * it at its next step, and a finished one is woken by it. Its ack says which;
+ * the agent's reply, its next words, is logged when it comes (`turn.step`).
+ */
+async function sendChat($: EngineInterface, agentId: string, text: string, ackId = ''): Promise<void> {
+  const agent = M.agentOf(data, agentId)
+  const now = await $.clock.now()
+  if (!agent) {
+    await ack($, ackId, 'failed', 'No such agent in this session')
+    return
+  }
+
+  if (agent.kind === 'main') {
+    const isBusy = agent.status === 'running'
+    // busy, it reads them once its turn ends; idle, at once
+    await queueForMain($, text, ackId, isBusy ? { status: 'queued', text: 'Claude reads it when it finishes its current turn' } : { status: 'delivered', text: 'Claude reads it now' })
+    $.ui.toast(isBusy ? 'Queued for the Orchestrator: it reads it when its current turn ends.' : 'Sent to the Orchestrator.')
+    redraw($)
+    return
+  }
+
+  const sent = await $.session.send({ to: { agentId }, text }).catch(error => ({ isDelivered: false as const, reason: String(error) }))
+  const message = M.addMessage(data, { from: M.YOU, to: agentId, kind: 'chat', text, at: now, isDelivered: sent.isDelivered, ...(ackId ? { ackId } : {}) })
+  if (sent.isDelivered) {
+    $.ui.toast(`Sent to ${W.rowTitleOf(agent)}`)
+    if (M.isEnded(agent.status)) M.reopen(agent, now)
+    replies.set(agentId, { since: now, isRead: false })
+    await ack($, ackId, 'delivered', 'It reads it at its next step')
+  } else if (isAutoModeRefusal(sent.reason)) {
+    // auto mode takes no send from the deck: the Orchestrator passes your words on, and they stay in this agent's Talk
+    await relayViaMain($, agent, text, ackId, message)
+  } else {
+    const why = undeliveredOf(sent.reason)
+    $.ui.toast(why)
+    await ack($, ackId, 'failed', why)
+  }
+  save($)
+  redraw($)
+}
+
+/** What a refused send to a subagent says in auto mode, where Claude Code's classifier judges the deck's sends. */
+const AUTO_MODE_REFUSAL = "Not delivered: in auto mode, Claude Code doesn't accept messages to subagents from the deck. Send it from the chat, or turn auto mode off for this chat."
+
+/** Whether a send was refused by auto mode's classifier ("no verdict", "denied by the … classifier"): one the Orchestrator can pass on. */
+function isAutoModeRefusal(reason: string | undefined): boolean {
+  return /\bno verdict\b|\bclassifier\b|\bauto[- ]mode\b/i.test(F.oneLine(reason ?? ''))
+}
+
+/** A text's first sentence on one line, at most `most` characters, an error's own name left off; '' for none. */
+function firstSentenceOf(text: string | undefined, most = 120): string {
+  const said = F.oneLine(text ?? '').replace(/^\w*Error:\s*/, '')
+  const first = /^.*?[.!?](?=\s|$)/.exec(said)?.[0] ?? said
+  return F.trunc(first.trim(), most)
+}
+
+/**
+ * A refused send in the deck's own words, never the engine's raw refusal
+ * (an auto-mode classifier's holds words meant for the model): a refusal of
+ * the auto-mode classifier says so plainly; any other its first sentence,
+ * at most 120 characters.
+ */
+function undeliveredOf(reason: string | undefined): string {
+  if (isAutoModeRefusal(reason)) return AUTO_MODE_REFUSAL
+  const shown = firstSentenceOf(reason)
+  return shown ? `Not delivered: ${shown}` : 'Not delivered'
+}
+
+/**
+ * Your messages to subagents that auto mode would not take from the deck,
+ * which the deck asked the Orchestrator to pass on (`relayViaMain`): the
+ * agent and its label, your words, the page's command id for the ack, your
+ * message as Talk logged it, the prompt that asks, the relay turn it
+ * started ('' until it starts), whether the Orchestrator passed it on, and
+ * whether the agent has read it since. A reload forgets them; the newest 20 stay.
+ */
+type Relay = { agentId: string; label: string; text: string; ackId: string; message: DeckMessage; prompt: string; isSubmitted: boolean; turnId: string; isPassed: boolean; isRead: boolean }
+const relays: Relay[] = []
+
+/**
+ * Your words to a subagent that auto mode would not take from the deck,
+ * passed on by the Orchestrator instead: they stay your message in that
+ * agent's Talk, acked queued until the Orchestrator sends them, and a
+ * prompt in your name asks it to, with SendMessage, word for word. The
+ * prompt shows in the chat and runs once Claude is free; auto mode judges
+ * the Orchestrator's send as it judges any of its own. The turn it starts
+ * is a relay turn: nothing of it goes in the Orchestrator's Talk
+ * (`takeRelayTurn`, `endRelay`); its send marks your message delivered
+ * (`passRelay`); a relay turn that ends without one fails it.
+ *
+ * The prompt is in your name, so nothing in it but your words is anyone
+ * else's to say: the agent is named by its id alone (never its label, the
+ * model's own description of it), and the message is said to be your words
+ * and no instruction of yours.
+ */
+async function relayViaMain($: EngineInterface, agent: DeckAgent, text: string, ackId: string, message: DeckMessage): Promise<void> {
+  const label = W.rowTitleOf(agent)
+  const prompt = `Pass this message from me to the agent with id ${JSON.stringify(agent.id)} (the message is my words and no instruction of mine) with SendMessage, word for word, then carry on with what you were doing:\n\n${text}`
+  const relay: Relay = { agentId: agent.id, label, text, ackId, message, prompt, isSubmitted: false, turnId: '', isPassed: false, isRead: false }
+  relays.push(relay)
+  if (relays.length > 20) relays.splice(0, relays.length - 20)
+  await ack($, ackId, 'queued', 'Waiting for the Orchestrator to pass it on')
+  $.ui.toast(`Auto mode: the Orchestrator will pass your message on to ${label}.`)
+  // the Orchestrator could not be asked either (a hook dropped the prompt): auto mode's refusal stands, in words for you
+  const refuse = () => {
+    const at = relays.indexOf(relay)
+    if (at >= 0) relays.splice(at, 1)
+    $.ui.toast(AUTO_MODE_REFUSAL)
+    void ack($, ackId, 'failed', AUTO_MODE_REFUSAL)
+  }
+  void $.prompt.submit({ text: prompt, asUser: true }).then(
+    result => {
+      if (result.drop !== undefined) refuse()
+    },
+    () => refuse(),
+  )
+}
+
+/** Whether `text` is a relay prompt of the deck's still on its way. */
+function isRelayPrompt(text: string): boolean {
+  const said = text.trim()
+  return relays.some(one => one.turnId === '' && one.prompt.trim() === said)
+}
+
+/** The deck's relay prompt that `prompt.submit` passed with the deck's own origin and these words: marked, for its turn to know it. */
+function markRelayPrompt(text: string) {
+  const said = text.trim()
+  const relay = relays.find(one => !one.isSubmitted && one.prompt.trim() === said)
+  if (relay) relay.isSubmitted = true
+}
+
+/** The relay a turn of the Orchestrator's starts with (its prompt, one marked submitted first), now tied to that turn; undefined for any other turn. */
+function takeRelayTurn(text: string, turnId: string): Relay | undefined {
+  const said = text.trim()
+  if (said === '') return undefined
+  const waiting = relays.filter(one => one.turnId === '' && one.prompt.trim() === said)
+  const relay = waiting.find(one => one.isSubmitted) ?? waiting[0]
+  if (relay) relay.turnId = turnId || 'turn'
+  return relay
+}
+
+/** The relay a send of the Orchestrator's to `agentId` passes on: the oldest not yet passed whose words the send holds. */
+function passRelay(agentId: string, text: string): Relay | undefined {
+  const sent = F.oneLine(text)
+  return relays.find(one => !one.isPassed && one.agentId === agentId && F.oneLine(one.text) !== '' && sent.includes(F.oneLine(one.text)))
+}
+
+/** The Orchestrator sent your words on: your message is delivered and its agent awaited (its next words are its reply), said in the ack and a toast. */
+async function relayPassed($: EngineInterface, relay: Relay, now: number): Promise<void> {
+  relay.isPassed = true
+  relay.message.isDelivered = true
+  const agent = M.agentOf(data, relay.agentId)
+  if (agent && M.isEnded(agent.status)) M.reopen(agent, now)
+  replies.set(relay.agentId, { since: now, isRead: false })
+  $.ui.toast(`Passed on to ${relay.label} by the Orchestrator.`)
+  await ack($, relay.ackId, 'delivered', 'Passed on by the Orchestrator')
+}
+
+/** Whether what agent `to` received is your message the Orchestrator passed on (logged already, as yours): marked read, so it matches once. */
+function isRelayEcho(to: string, text: string): boolean {
+  const body = F.oneLine(M.unwrapMessage(text).text)
+  const relay = relays.find(one => one.isPassed && !one.isRead && one.agentId === to && body.includes(F.oneLine(one.text)))
+  if (relay) relay.isRead = true
+  return relay !== undefined
+}
+
+/**
+ * The Orchestrator's turn `turnId` ended: whether it was a relay turn. A
+ * relay it started that was not passed on fails, saying so, with the first
+ * sentence of the turn's answer when it has one.
+ */
+function endRelay($: EngineInterface, turnId: string, answer: string): boolean {
+  const ended = relays.filter(one => one.turnId !== '' && one.turnId === (turnId || 'turn'))
+  for (const relay of ended) {
+    if (relay.isPassed) continue
+    relays.splice(relays.indexOf(relay), 1)
+    const first = firstSentenceOf(answer)
+    $.ui.toast(`The Orchestrator didn't pass your message on to ${relay.label}.`)
+    void ack($, relay.ackId, 'failed', first ? `The Orchestrator didn't pass it on. ${first}` : "The Orchestrator didn't pass it on")
+  }
+  return ended.length > 0
+}
+
+function usageOf(raw: Awaited<ReturnType<EngineInterface['session']['usage']>>): UsageInfo {
+  return {
+    startedAt: raw.startedAt,
+    ...(raw.context.percent !== undefined ? { contextPercent: raw.context.percent } : {}),
+    ...(raw.cost ? { costUsd: raw.cost.usd } : {}),
+    limits: raw.rateLimits.map(limit => ({ kind: limit.kind, percentUsed: limit.percentUsed })),
+  }
+}
+
+/**
+ * How the session began, as Claude Code's SessionStart says it: a fork's
+ * /cost total starts at the session it was forked from (which the engine
+ * does not name), so its spend counts that one's; a fresh start, a resume
+ * or a /clear is no fork. A compaction says nothing of it.
+ */
+function noteStart(source: string) {
+  if (source === 'fork') data.isFork = true
+  else if (source !== 'compact') delete data.isFork
+}
+
+async function loadUsage($: EngineInterface): Promise<void> {
+  try {
+    usage = usageOf(await $.session.usage())
+    usageAt = await $.clock.now()
+    redrawIfChanged($, usageAt)
+  } catch {
+    // the status line's figures are optional here
+  }
+}
+
+/** Folds in what the engine lists: agents spawned before this module loaded, and each one's status. */
+async function syncAgents($: EngineInterface): Promise<void> {
+  let list: AgentInfo[]
+  try {
+    list = await $.agent.list()
+  } catch {
+    return
+  }
+  const now = await $.clock.now()
+  let isChanged = false
+
+  for (const info of list) {
+    const isKnown = M.agentOf(data, info.id) !== undefined
+    // the engine lists subagents and teammates alone: a row taken for housekeeping is a real agent
+    const agent = M.ensureAgent(data, info.id, now, info.teammateId ? 'teammate' : 'agent')
+    if (!isKnown) isChanged = true
+    if (info.teammateId) agent.kind = 'teammate'
+    if (agent.origin === 'engine' || agent.origin === undefined) agent.origin = agent.kind === 'teammate' ? 'teammate' : 'agent'
+    if (info.description && !agent.description) agent.description = info.description
+    if (info.type && (agent.type === 'subagent' || agent.type === '')) agent.type = info.type
+    if (info.name && M.isNameless(agent)) agent.name = info.name
+    if (info.parentId && (agent.parentId === undefined || agent.parentId === M.MAIN) && M.agentOf(data, info.parentId)) agent.parentId = info.parentId
+    M.fixLabel(data, agent)
+    const status = info.status as DeckStatus
+    // a row the deck ended (its turn, SubagentStop, TeammateIdle) is not woken by a list that lags: its own next call does that
+    const isEndedHere = agent.endedAt !== undefined && !M.isLive(agent.status) && M.isLive(status)
+    if (agent.status !== status && !isEndedHere) {
+      agent.status = status
+      if (M.isEnded(status)) {
+        agent.endedAt ??= now
+        delete agent.current
+        delete agent.todo
+      }
+      isChanged = true
+    }
+  }
+
+  if (isChanged) touched($, now)
+}
+
+/** The most agents' transcripts one recovery pass reads. */
+const RECOVER_MOST = 12
+
+/**
+ * Recovery's own state: a pass under way, the agents whose transcripts were
+ * read (each once while this module runs), and whether the pane's first tick
+ * has looked yet (it looks again each time the pane opens).
+ */
+const recovery = { isBusy: false, isPaneSeen: false, tried: new Set<string>() }
+
+/**
+ * Reads back what a reload can cost the deck. With no goal in hand, the
+ * person's newest prompt in their own words becomes one (`M.recoverGoal`).
+ * Each ended agent with no result (at most 12 a pass, the latest to end
+ * first) takes the hand-back or last words its own transcript holds, unless
+ * the read is denied. Run unawaited from session.start and the pane's first
+ * tick, one pass at a time; what it fails at leaves the deck as it was.
+ */
+async function recoverLost($: EngineInterface): Promise<void> {
+  if (recovery.isBusy) return
+  recovery.isBusy = true
+  try {
+    const now = await $.clock.now()
+    let isChanged = false
+    if (!M.goalOf(data)) {
+      try {
+        const found = M.recoverGoal(await $.session.messages())
+        // a prompt may have started a goal while the transcript was read
+        if (found && !M.goalOf(data)) isChanged = M.noteRecoveredGoal(data, found, now) !== undefined
+      } catch {
+        // no goal recovered: the person's next prompt starts one
+      }
+    }
+    const ids = M.unansweredOf(data)
+      .map(agent => agent.id)
+      .filter(id => !recovery.tried.has(id))
+      .slice(0, RECOVER_MOST)
+    for (const id of ids) {
+      recovery.tried.add(id)
+      try {
+        const found = await $.session.messages({ agentId: id })
+        const result = Array.isArray(found) ? M.recoverResult(found) : undefined
+        // the row as it stands now: a result that came meanwhile stays
+        const agent = M.agentOf(data, id)
+        if (result && agent && M.isEnded(agent.status) && !agent.answer) isChanged = M.noteResult(data, agent, result.text, agent.endedAt ?? now, result.via) || isChanged
+      } catch {
+        // that agent stays without a result
+      }
+    }
+    if (isChanged) changed($)
+  } catch {
+    // recovery is a nicety: the deck goes on as it was
+  } finally {
+    recovery.isBusy = false
+  }
+}
+
+/**
+ * Every 2.5 seconds: folds in the agents' statuses and, while the pane is
+ * open or the web deck is on, re-reads git and usage in the background (the
+ * pane's history too). It draws only when the screen would change
+ * (`redrawIfChanged`, the web deck's signal as well); events draw for themselves.
+ */
+async function tick($: EngineInterface): Promise<void> {
+  await checkDebug($)
+  const now = await $.clock.now()
+  // workflow agents and housekeeping loops fold away: they keep nothing on screen live
+  const isAnyLive = M.hasLiveAgents(data)
+  // every session on this machine: this one's inbox, the others' files while they show, the one viewed (./registry)
+  await SR.registryTick(now, isWebOn())
+  // a loop of Claude Code's own at work may be an agent the deck has not placed (a reload lost its spawn): the list says
+  if (isAnyLive || isPaneOpen || isSharing() || M.hasLiveEngineLoops(data)) await syncAgents($)
+  if (isPaneOpen || isSharing()) {
+    if (now - lastGitRead() > 6000) void refreshGit($)
+    if (now - usageAt > 10_000) void loadUsage($)
+  }
+  // what the deck may stop: Claude Code's permission check asked again where its verdict is missing or old
+  if (isPaneOpen || isWebOn()) probeStops($, now)
+  // the page's words held for your Send: those past their ten minutes, or answers to a question that no longer waits, go unsent
+  await pruneHeld($)
+  // the pane's first tick looks again for what a reload lost (once a pass under way is done)
+  if (!isPaneOpen) {
+    recovery.isPaneSeen = false
+  } else if (!recovery.isPaneSeen && !recovery.isBusy) {
+    recovery.isPaneSeen = true
+    void recoverLost($)
+  }
+  // with the pane shut, no agent at work and no web deck nothing of the deck's is on screen: the next event draws
+  if (isPaneOpen || isAnyLive || isSharing()) redrawIfChanged($, now)
+}
+
+/** The terminal's height as its last drawing of the deck (the pane or the band) measured it; 0 until one has. */
+let screenRows = 0
+
+/** Keeps the terminal's height a drawing on the terminal measured. */
+function noteScreen(surface: RenderSurface, viewport: { rows: number } | undefined) {
+  if (surface === 'terminal' && viewport && viewport.rows > 0) screenRows = viewport.rows
+}
+
+/** The cells the docked pane asks for. */
+const DOCK_COLUMNS = 120
+
+export async function openPane($: EngineInterface): Promise<boolean> {
+  // on a terminal of known height, an inline pane no taller than it leaves room for (`openRowsFor`): past the terminal's height, every redraw leaves stray lines
+  const rows = openRowsFor(screenRows)
+  // docked beside a fullscreen transcript: 120 cells, where the Dashboard sets its sections side by side (the engine keeps a dock to 45% of the terminal)
+  const opened = await $.ui.open({ id: PANE, title: 'Eagle Eye', focus: true, columns: DOCK_COLUMNS, ...(rows !== undefined ? { rows } : {}) })
+  isPaneOpen = true
+  void refreshGit($, true)
+  void loadUsage($)
+  void syncAgents($)
+  if (view.commit) void loadCommit($, view.commit)
+  return opened.isPlaced
+}
+
+export function changed($: EngineInterface) {
+  save($)
+  redraw($)
+}
+
+/** How long a scroll waits for the drawing a press asked for: the engine folds redraws to ten a second. */
+const SCROLL_MS = 150
+
+/**
+ * Brings the element keyed `key` into the pane's view, its top at the
+ * window's top (`block` start; `nearest` moves the least that shows it),
+ * once the drawing that holds it is up: a press that changed the view draws
+ * it again first. Tried once more a beat later when the engine says no (not
+ * drawn yet); an engine without `$.ui.scroll` leaves the pane where it is.
+ */
+function scrollTo($: EngineInterface, key: string, block: 'start' | 'nearest' = 'start', tries = 2) {
+  $.clock.after(SCROLL_MS, () => {
+    noteMove(`${key} ${block}`)
+    try {
+      void $.ui
+        .scroll({ to: { key }, in: PANE, block })
+        .then(result => {
+          if (result.deny !== undefined && tries > 1) scrollTo($, key, block, tries - 1)
+        })
+        .catch(() => undefined)
+    } catch {
+      // no scroll on this engine: the pane stays where it is
+    }
+  })
+}
+
+/**
+ * Chat keeps to its newest message while you are at the pane's end, as a
+ * chat does (./ui/v2/chat's `followStep`): whether Chat showed at the last
+ * drawing, what it ended with then, and whether you are at the end. You
+ * are there once Chat comes into view (its tab, `/eagle-eye chat`, `m`, Back to
+ * it, a new filter) or you send from it, and while your own scrolling
+ * (`ui.scroll`) leaves you there; not once you scroll up, by a row or more.
+ */
+export const chatFollow: ChatFollow = { isShown: false, end: '', isAtEnd: false }
+
+/**
+ * Takes the pane to its end, where the engine keeps it while the drawing
+ * grows and nothing else moves it, once the drawing is up: unless, by then,
+ * you scrolled away from the end, Chat left view or the list of sessions
+ * dropped over it. It scrolls and never redraws, so a click in flight still
+ * lands.
+ */
+function scrollToEnd($: EngineInterface) {
+  $.clock.after(SCROLL_MS, () => {
+    if (!chatFollow.isShown || !chatFollow.isAtEnd || SR.isListOpen()) return
+    noteMove('end')
+    try {
+      void $.ui.scroll({ in: PANE, to: 'end' }).catch(() => undefined)
+    } catch {
+      // no scroll on this engine: the pane stays where it is
+    }
+  })
+}
+
+/**
+ * Scrolls the pane to its top at once, before the screen being drawn now is
+ * up. This releases the pane from Chat's end: once a window is scrolled to
+ * its end, the engine and the Desktop keep it there through every later
+ * draw, whatever it shows, until a scroll moves it. So the screen replacing
+ * Chat neither opens at its bottom nor follows it as it grows. A
+ * scroll-into-view that a press asked for lands after this.
+ */
+function scrollToStart($: EngineInterface) {
+  noteMove('start')
+  try {
+    void $.ui.scroll({ in: PANE, to: 'start' }).catch(() => undefined)
+  } catch {
+    // no scroll on this engine: the pane stays where it is
+  }
+}
+
+/**
+ * At each drawing of the pane: Chat coming into view takes the pane to its
+ * end, and something new at Chat's end does too while you were there; Chat
+ * leaving view while the pane kept to its end takes it to the top of what
+ * shows instead. While the list of sessions is dropped over the tabs, no
+ * drawing moves the pane. Anything else leaves the pane to you.
+ */
+function keepChat($: EngineInterface, now: number) {
+  const isListOpen = SR.isListOpen()
+  const state = !isListOpen && view.v2.tab === 'chat' && view.page === '' ? shownV2Of(now) : null
+  const step = followStep(chatFollow, state ? chatEndOf(state, view.v2.chatFilter) : null, isListOpen)
+  if (step === 'end') scrollToEnd($)
+  else if (step === 'start') scrollToStart($)
+}
+
+/**
+ * `s`, the header's title or its count of sessions, `/eagle-eye sessions`:
+ * opens the list of sessions over the tabs (./registry), or closes it. When
+ * it opens, Chat stops keeping to its end (./ui/v2/chat's `listStep`): you
+ * are up at the list, and no drawing moves the pane while it shows. A pane
+ * that was kept at Chat's end scrolls to its top at once, where the list
+ * opens, which releases it from the end the engine and the Desktop held it at.
+ */
+export function toggleSessions($: EngineInterface) {
+  SR.toggleList()
+  if (SR.isListOpen() && listStep(chatFollow) === 'start') scrollToStart($)
+}
+
+/**
+ * A file read only as a plain file (the registry's, a session folder's: one
+ * another program of the person's could write into): a FIFO, a device, a
+ * folder or a link there is refused, never waited on or read through.
+ * The engine's read opens whatever is at the path, so a look comes first;
+ * these folders are the person's own (0700), and only their own programs
+ * could swap a file in between.
+ */
+async function readPlain($: EngineInterface, path: string): Promise<string> {
+  const stat = await $.fs.stat(path)
+  if (stat.isLink || stat.kind !== 'file') throw new Error('not a plain file')
+  return $.fs.read(path)
+}
+
+/**
+ * The whole text of message `id` the state cut (`isCut`), for an agent
+ * page's Show more, as the web page's `/message/<id>` serves it: the deck's
+ * own copy while it holds one (whole under 700 characters; a longer one's
+ * kept until the web deck writes it), else the file the web deck wrote
+ * (`<home>/web/<session>/messages/<id>.md`); in the sample, its own as read
+ * (`demo.v2Files`), else its file (web/fixtures/v2/messages). `onRead` gets
+ * it, or null; then the pane draws.
+ */
+async function readMessage($: EngineInterface, id: string, onRead: (text: string | null) => void): Promise<void> {
+  let text: string | null = null
+  if (/^[A-Za-z0-9_-]{1,200}$/.test(id)) {
+    const own = view.isDemo ? undefined : data.messages.find(message => W.webIdOf(message.id) === id)
+    const sampled = view.isDemo ? demo.v2Files.message(id) : null
+    if (sampled !== null) text = sampled
+    else if (own?.full !== undefined) text = own.full
+    else if (own && own.isSaved !== true && Array.from(own.text).length < M.LIMITS.messageChars) text = own.text
+    else {
+      const root = $.plugin.root.replace(/[\\/]+$/, '')
+      const dir = view.isDemo ? `${root}/web/fixtures/v2` : webDir() || W.webDirOf(homeDir(), sessionId)
+      try {
+        if (dir === '') throw new Error('no folder')
+        text = await readPlain($, `${dir}/messages/${id}.md`)
+      } catch {
+        // not on disk: the deck's own cut is the most there is
+        text = own ? own.text : null
+      }
+    }
+  }
+  try {
+    onRead(text === null ? null : text.replace(/\r\n/g, '\n').trimEnd())
+  } catch {
+    // the pane goes on without it
+  }
+  redraw($)
+}
+
+/**
+ * Moves the pane's focus ring onto the Button keyed `key` (`$.ui.focus`; a
+ * row the next drawing brings is waited for), then brings it into view. A
+ * refusal (the pane does not hold the keys, no such row is drawn) leaves the
+ * ring where it was.
+ */
+async function focusOn($: EngineInterface, key: string): Promise<void> {
+  try {
+    const moved = await $.ui.focus({ requestId: PANE, key })
+    if (moved.deny !== undefined) return
+    paneFocus = key
+    scrollTo($, key, 'nearest')
+  } catch {
+    // no focus on this engine: the ring stays where it is
+  }
+}
+
+/** The v2 state the pane shows: the sample's while it shows (null while it is read), else this session's. */
+function shownV2Of(now: number): W.WebStateV2 | null {
+  return view.isDemo ? demoShown() : v2Of(now)
+}
+
+/** The ring a row down (1) or up (-1) among `keys`, else among the rows the v2 screen draws (`W.focusKeysOf`); held at either end. Chat and an agent's page move it onto their composer this way; no key is bound to it. */
+async function focusNext($: EngineInterface, dir: 1 | -1, keys?: readonly string[]): Promise<void> {
+  const state = keys ? null : shownV2Of(await $.clock.now())
+  const rows = keys ?? (state ? W.focusKeysOf(state, view.v2, view.page) : [])
+  const key = W.focusStepOf(rows, paneFocus, dir)
+  if (key !== '' && key !== paneFocus) await focusOn($, key)
+}
+
+/** Now (off an agent's page and Inspect): the ring on the next thing that needs you, after the one it is on, round to the first. No key is bound to it. */
+async function focusNeed($: EngineInterface): Promise<void> {
+  const state = shownV2Of(await $.clock.now())
+  const key = state ? W.nextNeedKeyOf(state, paneFocus) : ''
+  if (key === '') {
+    $.ui.toast('Nothing needs you')
+    return
+  }
+  if (view.v2.tab !== 'now' || view.page !== '') {
+    view.page = ''
+    view.v2 = M.view2With(view.v2, { tab: 'now' })
+    changed($)
+  }
+  await focusOn($, key)
+}
+
+/** The closures the views' buttons and fields run. */
+function actionsFor($: EngineInterface): DeckActions {
+  return {
+    openAgent: id => {
+      view.page = id
+      lastAgent = id
+      changed($)
+    },
+    back: () => {
+      view.page = ''
+      changed($)
+    },
+    // Now's sections fold to their heads, and the choice stays (the view's `collapsed`)
+    toggleSection: id => {
+      view.collapsed = M.collapsedWith(view.collapsed, id)
+      changed($)
+    },
+    answer: (callId, answers) => (view.isDemo ? void answerInSample($, callId, answers) : answerFromPane($, callId, answers)),
+    redraw: () => redraw($),
+    loadMessage: (id, onRead) => void readMessage($, id, onRead),
+    reveal: (key, block) => scrollTo($, key, block),
+    exitDemo: () => {
+      SR.showHere()
+      leaveDemo()
+      view.page = ''
+      changed($)
+    },
+    // the v2 screens' own state: each field checked as a reload checks it; Changes reads the file it shows again
+    setV2View: patch => {
+      // a tab pressed over the list of sessions leaves it for that tab
+      if (patch.tab !== undefined) SR.closeList()
+      // Chat opened by a press (its tab, m) or filtered anew: the next drawing takes the pane to its newest message
+      if (patch.tab === 'chat' || (patch.chatFilter !== undefined && patch.chatFilter !== view.v2.chatFilter)) chatFollow.isShown = false
+      view.v2 = M.view2With(view.v2, patch)
+      if (view.v2.tab === 'changes' && view.file && currentGit().isRepo) void loadFileDiff($, view.file)
+      changed($)
+    },
+    // j and k: the focus a row down or up; n: the next thing that needs you
+    focusNext: (dir, keys) => void focusNext($, dir, keys),
+    focusNeed: () => void focusNeed($),
+    // Changes' picks and Follow the work: the repository it shows pinned, or let follow the work again; the sample's are a recording
+    selectRepo: root => (view.isDemo ? $.ui.toast('Sample data: Changes shows the sample’s repository. Back to this chat to pick one of yours.') : void chooseRepo($, root).then(why => why && $.ui.toast(why))),
+    selectFile: path => {
+      view.file = view.file === path ? '' : path
+      closeFileDiff()
+      if (view.file && currentGit().isRepo) void loadFileDiff($, path)
+      changed($)
+    },
+    selectCommit: hash => {
+      view.commit = view.commit === hash ? '' : hash
+      closeCommit()
+      if (view.commit) void loadCommit($, hash)
+      changed($)
+    },
+    toggleBand: () => {
+      view.isBandHidden = !view.isBandHidden
+      savePrefs($)
+      changed($)
+    },
+    setAvatarStyle: style => setAvatarStyle($, style),
+    // the deck's own tidying, nothing in Claude Code: finished agents hidden, or shown again
+    clearFinished: () => void clearFinished($),
+    showCleared: () => void showCleared($),
+    // Stop, Stop turn and Cancel: Claude Code's own TaskStop, $.turn.abort and CronDelete; the sample stops nothing
+    stopAgent: id => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your agents.') : void stopAgent($, id)),
+    abortTurn: () => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your turn.') : void abortTurn($, data.mainTurnId ?? '')),
+    stopBackground: id => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your background work.') : void stopBackground($, id)),
+
+    // the sample's chat sends nothing: its agents are a recording, and its Orchestrator is not this session's
+    // a send from the pane's composer carries an id: its ack says what came of it, under the message; Chat keeps to its end, where it shows
+    sendChat: (agentId, text, ackId) => {
+      if (view.isDemo) {
+        $.ui.toast('Sample data: nothing is sent. Back to this chat to talk to your agents.')
+        return
+      }
+      chatFollow.isAtEnd = true
+      void sendChat($, agentId, text, W.cmdIdOf({ id: ackId }))
+    },
+    review: text => fillReview($, text),
+    // every session on this machine (./registry): the list dropped over the tabs (`s`), and any session's deck shown in this one's place (here's again: this deck's own)
+    openSessions: () => toggleSessions($),
+    closeSessions: () => SR.closeList(),
+    openSession: id => void SR.openSession(id, view.isDemo),
+    // the band's Open: this session's deck on that tab, off a page
+    open: tab => {
+      SR.showHere()
+      leaveDemo()
+      view.v2 = M.view2With(view.v2, { tab })
+      view.page = ''
+      changed($)
+      void openPane($)
+    },
+    openBrowser: () => void openOwnBrowser($),
+    // the band's rows of what the Browser pane's page sent in your voice (./hold): your Send runs it, Discard drops it, More shows it whole
+    sendHeld: key => sendHeld($, key),
+    discardHeld: key => discardHeld($, key),
+    toggleHeld: key => toggleHeld($, key),
+  }
+}
+
+function kitOf(ui: ReturnType<EngineInterface['ui']['resolve']>, surface: Kit['surface'], columns: number, rows?: number): Kit {
+  return {
+    surface,
+    ...(rows !== undefined ? { rows } : {}),
+    Box: ui.Box,
+    Text: ui.Text,
+    Button: ui.Button,
+    Code: ui.Code,
+    Markdown: ui.Markdown,
+    columns,
+    avatarStyle: view.avatarStyle,
+    ...('Input' in ui ? { Input: ui.Input } : {}),
+    ...('Select' in ui ? { Select: ui.Select } : {}),
+    // the terminal's table answers to Svg but draws nothing for it: there the screens draw text
+    ...('Svg' in ui && surface !== 'terminal' ? { Svg: ui.Svg } : {}),
+    // a table answers to every element name: only the terminal and the desktop run a surface module (Org's chart)
+    ...('Client' in ui && (surface === 'terminal' || surface === 'desktop') ? { Client: ui.Client } : {}),
+  }
+}
+
+/** What the pane draws from: this session's v2 state and its lazy files, or the sample's while it shows (with the sample's sessions); whether Org's chart failed on `surface`, and the agent it marks; another session's deck while one is viewed. */
+function dashOf(now: number, surface: RenderSurface, $: EngineInterface): DashModel {
+  const isDemo = view.isDemo
+  const sample = isDemo ? demoShown() : null
+  const sampleSessions = sample ? SR.sessionsFor(null, now) : null
+  return {
+    v2: isDemo ? (sample && sampleSessions ? { ...sample, sessions: sampleSessions } : sample) : v2Of(now),
+    viewing: SR.viewingFor(modelOf(now), actionsFor($)),
+    v2Files: isDemo ? demo.v2Files : W.v2FilesOf(data, currentGitDiffs()),
+    isDemo,
+    demoNote: demo.note,
+    isOrgDown: isOrgDownOn(surface),
+    selected: lastAgent,
+  }
+}
+
+/**
+ * What Org's chart Client posted: `{ type: 'open', id }` for a card clicked
+ * opens that agent's page, when the pane shows that agent (this session's,
+ * or the sample's). Anything else is let go: it came from code.
+ */
+async function openFromChart($: EngineInterface, posted: unknown): Promise<void> {
+  if (typeof posted !== 'object' || posted === null) return
+  const { type, id } = posted as { type?: unknown; id?: unknown }
+  if (type !== 'open' || typeof id !== 'string') return
+  const state = shownV2Of(await $.clock.now())
+  if (!state?.agents.some(row => row.row === 'agent' && row.id === id)) return
+  view.page = id
+  lastAgent = id
+  changed($)
+}
+
+/** Leaves the sample: the pane shows this session again. */
+export function leaveDemo() {
+  SR.leaveSample()
+  if (!view.isDemo && demo.v2 === null) return
+  view.isDemo = false
+  demo.v2 = null
+  demo.v2Files = W.v2FilesFrom({ agents: {}, patches: {}, messages: {} })
+  demo.note = ''
+  demo.version += 1
+}
+
+/**
+ * The v2 sample's lazy files under `dir` (web/fixtures/v2): each agent's
+ * file its rows name (its times moved by `by`, as the state's were), each
+ * edit's patch, each cut message's whole text. One that cannot be read is
+ * left out: its screen says so.
+ */
+async function readV2Sample($: EngineInterface, dir: string, state: W.WebStateV2, by: number): Promise<W.V2Files> {
+  const isSafe = (id: string) => /^[A-Za-z0-9_-]{1,128}$/.test(id)
+  const agents: Record<string, W.V2AgentFile> = {}
+  const patches: Record<string, string> = {}
+  const messages: Record<string, string> = {}
+  const gitDiffsRead: Record<string, string> = {}
+  let timeline: T.V2Timeline | null = null
+  const read = async (path: string, keep: (text: string) => void) => {
+    try {
+      keep(await $.fs.read(path))
+    } catch {
+      // not in the sample: left out
+    }
+  }
+  await Promise.all([
+    ...state.agents.flatMap(row =>
+      row.row === 'agent' && isSafe(row.fileId)
+        ? [
+            read(`${dir}/agents/${row.fileId}.json`, text => {
+              agents[row.fileId] = W.v2TimesMoved(JSON.parse(text) as W.V2AgentFile, by)
+            }),
+          ]
+        : [],
+    ),
+    ...state.changes.edits.filter(edit => isSafe(edit.id)).map(edit => read(`${dir}/patches/${edit.id}.diff`, text => (patches[edit.id] = text.replace(/\r\n/g, '\n')))),
+    ...state.chat.filter(row => row.isCut && isSafe(row.id)).map(row => read(`${dir}/messages/${row.id}.md`, text => (messages[row.id] = text.replace(/\r\n/g, '\n').trimEnd()))),
+    ...state.changes.files.flatMap(file => (file.diffId !== null && isSafe(file.diffId) ? [file.diffId] : [])).map(id => read(`${dir}/gitdiffs/${id}.diff`, text => (gitDiffsRead[id] = text.replace(/\r\n/g, '\n')))),
+    read(`${dir}/timeline.json`, text => (timeline = T.timelineFromText(text, by))),
+  ])
+  return W.v2FilesFrom({ agents, patches, messages, gitDiffs: gitDiffsRead, timeline })
+}
+
+/**
+ * `/eagle-eye demo`, or a reload while the sample showed: reads the v2 sample
+ * under the mod's folder (web/fixtures/state.v2.json, then the lazy files
+ * its state names under web/fixtures/v2) and shows it, its times moved to
+ * now. `isFresh` opens it on Now; a reload keeps the tab and page it was on.
+ * Answers why it could not be read; '' once it shows.
+ */
+export async function loadDemo($: EngineInterface, isFresh: boolean): Promise<string> {
+  const root = $.plugin.root.replace(/[\\/]+$/, '')
+  view.isDemo = true
+  if (isFresh) {
+    view.page = ''
+    view.v2 = M.view2With(view.v2, { tab: 'now' })
+  }
+  demo.v2 = null
+  demo.v2Files = W.v2FilesFrom({ agents: {}, patches: {}, messages: {} })
+  demo.note = ''
+  demo.version += 1
+  redraw($)
+  const readAt = await $.clock.now()
+  let shown: W.WebStateV2 | null = null
+  let files: W.V2Files | null = null
+  // the sample's other sessions, for its All sessions (`s`)
+  void SR.readSample(root, readAt)
+  try {
+    const text = await $.fs.read(`${root}/web/fixtures/state.v2.json`)
+    shown = W.v2StateFromText(text, readAt)
+    if (shown) files = await readV2Sample($, `${root}/web/fixtures/v2`, shown, readAt - (JSON.parse(text) as { now: number }).now)
+  } catch {
+    shown = null
+  }
+  // left (or loaded afresh) while it was read
+  if (!view.isDemo || demo.v2 !== null) return ''
+  if (!shown) {
+    demo.note = 'The sample could not be read: web/fixtures/state.v2.json is missing, or not a deck state.'
+    demo.version += 1
+    redraw($)
+    return demo.note
+  }
+  const isPage = (id: string) => shown?.agents.some(row => row.row === 'agent' && row.id === id) === true
+  demo.v2 = shown
+  if (files) demo.v2Files = files
+  if (view.page !== '' && !isPage(view.page)) view.page = ''
+  demo.version += 1
+  changed($)
+  return ''
+}
+
+/** The state a drawing reads: the live model, as it is now; the views build their rows from it. */
+function modelOf(now: number): DeckModel {
+  return {
+    data,
+    view,
+    git: currentGit(),
+    fileDiff: currentFileDiff(),
+    commit: currentCommit(),
+    usage,
+    now,
+    cwd,
+    web: webPaneOf(),
+    // what the band says: this session's, never the sample's
+    band: W.bandOf(v2Of(now)),
+    held: H.heldRowsOf(heldQueue().items, heldQueue().open),
+    isSessionsOpen: SR.isListOpen(),
+  }
+}
+
+/**
+ * What the registry of sessions (./registry) reads of this deck: its id, its
+ * state, its folder, its process, the plugin's store (where the person's
+ * key for the registry's seals is kept); a command another session's deck
+ * sent runs here as the page's own would (`steerFromSession`).
+ */
+function registryHost($: EngineInterface): SR.RegistryHost {
+  const read = async (get: () => Promise<string | undefined>) => {
+    try {
+      return await get()
+    } catch {
+      // nothing answers (the tests): unset
+      return undefined
+    }
+  }
+  return {
+    env: async () => ({
+      override: await read(() => $.env.get('EAGLE_EYE_SESSIONS')),
+      eagleEyeHome: await read(() => $.env.get('EAGLE_EYE_HOME')),
+      configDir: await read(() => $.env.get('CLAUDE_CONFIG_DIR')),
+      home: (await read(() => $.env.get('USERPROFILE'))) ?? (await read(() => $.env.get('HOME'))),
+      wtSession: await read(() => $.env.get('WT_SESSION')),
+      termProgram: await read(() => $.env.get('TERM_PROGRAM')),
+    }),
+    now: () => $.clock.now(),
+    read: path => readPlain($, path),
+    write: (path, text) => $.fs.write(path, text),
+    list: path => $.fs.list(path),
+    stat: path => $.fs.stat(path),
+    storeGet: key => $.store.get(key),
+    storeSet: (key, value) => $.store.set(key, value),
+    node: args => $.process.run(['node', ...args], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) }),
+    every: (ms, fn) => $.clock.every(ms, fn),
+    after: (ms, fn) => $.clock.after(ms, fn),
+    surfaces: () => $.session.surfaces(),
+    repoRoot: async () => (await $.session.repo())?.root ?? null,
+    sessionId: () => sessionId,
+    stateOf: now => v2Of(now),
+    dirOf: () => webDir() || (sessionId !== '' ? W.webDirOf(homeDir(), sessionId) : ''),
+    pidOf: () => sessionPidOf($),
+    steer: cmd => steerFromSession($, cmd),
+    hasAck: id => data.acks.some(one => one.id === id),
+    ack: (id, status, text) => void ack($, id, status, text),
+    changed: () => changed($),
+    refresh: now => redrawIfChanged($, now),
+    // a deck views this session: its folder written from now, as for /eagle-eye web
+    share: () => shareWeb($),
+    toast: text => $.ui.toast(text),
+  }
+}
+
+/**
+ * A command another session's deck sent (its inbox, ./registry): one of
+ * `SE.STEERING`, each field checked (`SE.steeringCmdOf`), runs exactly as
+ * the page's own (`runCommand`: an answer, a message, Stop, Stop turn,
+ * Cancel, Clear finished, a pick of Changes, Review), through Claude Code's
+ * channels and with the same checks, its ack in this session's state; any
+ * other is refused, its ack saying why.
+ */
+function steerFromSession($: EngineInterface, cmd: Record<string, unknown>) {
+  const said = SE.steeringCmdOf(cmd)
+  if (said) runCommand($, said)
+  else void ack($, W.cmdIdOf(cmd), 'failed', SE.steeringRefusalOf(cmd))
+}
+
+function editedPathOf(input: Record<string, unknown>): string {
+  return typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
+}
+
+/** A tool's `structuredPatch` (or a bashEditDiff file's hunks) as the deck's hunks, each line cleaned. */
+function hunksFrom(value: unknown): Hunk[] {
+  const patch = Array.isArray(value) ? (value as unknown[]) : []
+  return patch
+    .filter((hunk): hunk is Record<string, unknown> => typeof hunk === 'object' && hunk !== null)
+    .map(hunk => ({
+      oldStart: Number(hunk.oldStart) || 0,
+      oldLines: Number(hunk.oldLines) || 0,
+      newStart: Number(hunk.newStart) || 0,
+      newLines: Number(hunk.newLines) || 0,
+      lines: Array.isArray(hunk.lines) ? hunk.lines.map(line => F.clean(String(line))) : [],
+    }))
+}
+
+/**
+ * Records exactly what an Edit, Write or NotebookEdit changed, from the
+ * tool's own patch, under `abs`, the file's path as the file system spells
+ * it (`realPathOf`), so it compares with git's; and whether the person
+ * changed the proposed edit before accepting it (`userModified`).
+ */
+function recordEdit(agent: DeckAgent, tool: string, id: string, input: Record<string, unknown>, ran: ToolCallResult, now: number, abs: string) {
+  if (!abs) return
+  const record = (ran.result ?? null) as Record<string, unknown> | null
+  if (record && record.staged === true) return
+
+  let hunks: Hunk[] = hunksFrom(record?.structuredPatch)
+  const isNew = tool === 'Write' && record?.type === 'create'
+
+  if (hunks.length === 0) {
+    if (tool === 'Write' && isNew) hunks = addedFileHunks(String(input.content ?? ''))
+    else if (tool === 'Edit') hunks = replaceHunks(String(input.old_string ?? ''), String(input.new_string ?? ''))
+    else if (tool === 'NotebookEdit') hunks = addedFileHunks(String(input.new_source ?? ''))
+  }
+
+  const { added, removed } = countOf(hunks)
+  M.addEdit(data, agent, {
+    id,
+    agent: agent.id,
+    tool,
+    path: M.relOf(abs, currentGit().root || null),
+    abs: M.normPath(abs),
+    at: now,
+    added,
+    removed,
+    patch: patchOf(hunks, M.LIMITS.patchChars),
+    isNew,
+    ...(record?.userModified === true ? { userModified: true } : {}),
+  })
+  // the next git refresh probes a directory not seen before, and follows the repository edited last
+  R.noteEdit(repoBook(), abs, now)
+}
+
+/**
+ * Records the files a Bash command changed, from its result's
+ * `bashEditDiff` (feature-detected: an internal field, absent on builds
+ * without it, and skipped when it says the diff is unavailable): one edit
+ * per file, with that file's exact hunks. Answers how many it recorded.
+ */
+async function recordShellEdits($: EngineInterface, agent: DeckAgent, tool: string, id: string, ran: ToolCallResult, now: number): Promise<number> {
+  const record = (ran.result ?? null) as Record<string, unknown> | null
+  const diff = record && typeof record.bashEditDiff === 'object' && record.bashEditDiff !== null ? (record.bashEditDiff as Record<string, unknown>) : null
+  if (!diff || diff.unavailable === true || diff.skipped === true || !Array.isArray(diff.files)) return 0
+  let count = 0
+  for (const file of diff.files as unknown[]) {
+    if (typeof file !== 'object' || file === null) continue
+    const one = file as Record<string, unknown>
+    if (typeof one.filePath !== 'string' || one.filePath === '') continue
+    const abs = await realPathOf($, one.filePath)
+    const hunks = hunksFrom(one.hunks)
+    const { added, removed } = countOf(hunks)
+    M.addEdit(data, agent, {
+      id: `${id}:${count}`,
+      agent: agent.id,
+      tool,
+      path: M.relOf(abs, currentGit().root || null),
+      abs: M.normPath(abs),
+      at: now,
+      added,
+      removed,
+      patch: patchOf(hunks, M.LIMITS.patchChars),
+      isNew: one.created === true,
+    })
+    R.noteEdit(repoBook(), abs, now)
+    count += 1
+  }
+  return count
+}
+
+// Held on you: the questions the deck may answer, and the permission prompts it shows.
+
+/** The `tool.call` hook's own argument and chain, as `raceDeck` takes them. */
+type ToolCallEvent = Parameters<Events['tool.call']>[1]
+type ToolCallNext = Parameters<Events['tool.call']>[2]
+
+/** The deck's answer to a question: the answers by question, as the dialog gives them, and the id of the page's command for its ack. */
+type DeckAnswer = { answers: Record<string, string>; ackId: string }
+
+/**
+ * The questions the deck may answer, by the AskUserQuestion call's
+ * tool_use_id: what settles that call's race with the deck's answer
+ * (`raceDeck`). Like `web.waiters`, it lives in this module alone: a reload
+ * drops every one, so a question restored from the snapshot is shown, never
+ * answered from the page (`isAnswerable`).
+ */
+const askers = new Map<string, (answer: DeckAnswer) => void>()
+
+/** How a question's race ended: the deck answered, Claude Code did (its dialog, or its idle timer), or the call went unanswered (dismissed, failed, abandoned). */
+type QuestionEnd = 'deck' | 'engine' | 'idle' | 'gone'
+
+/** How the latest questions ended, by call id: what an answer from the page that comes too late is told. */
+const questionEnds = new Map<string, QuestionEnd>()
+
+/** The tool calls in flight whose start this module saw. Their ends are still to come, so a note that one of them is waiting on you is never stale. */
+const openCalls = new Set<string>()
+
+/**
+ * The calls `tool.check` sent to the permission mode's decider (an `ask`),
+ * by tool_use_id, until they end. One becomes a permission prompt waiting on
+ * you when its dialog shows (`classic.PermissionRequest`). An ask alone
+ * proves nothing: the auto-mode classifier and a headless host get asks too.
+ */
+const asks = new Map<string, { tool: string; input: unknown; agentId: string }>()
+
+/** The tools whose dialog is the person's own say (a question, a plan to approve): never a permission prompt. */
+const PERSON_TOOLS: readonly string[] = ['AskUserQuestion', 'ExitPlanMode']
+
+/** The most asks and question ends kept: beyond, the oldest go. */
+const MOST_KEPT = 100
+
+function keepAtMost<K, V>(map: Map<K, V>, most: number) {
+  for (const key of map.keys()) {
+    if (map.size <= most) return
+    map.delete(key)
+  }
+}
+
+/** Plain data in one spelling whatever its keys' order: how a permission dialog's input is matched to its call's. */
+function sameValue(a: unknown, b: unknown): boolean {
+  const spell = (value: unknown): unknown =>
+    Array.isArray(value)
+      ? value.map(spell)
+      : value !== null && typeof value === 'object'
+        ? Object.fromEntries(
+            Object.entries(value as Record<string, unknown>)
+              .filter(([, one]) => one !== undefined)
+              .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+              .map(([key, one]) => [key, spell(one)]),
+          )
+        : value
+  return JSON.stringify(spell(a)) === JSON.stringify(spell(b))
+}
+
+/**
+ * The call a permission dialog is for: the ask whose tool, input and loop
+ * match the dialog's (`tool_name`, `tool_input`, `agent_id`), the oldest
+ * first; with none exact, the one ask of that tool in that loop. Undefined
+ * when none can be told, or the call is noted held already.
+ */
+function askFor(tool: string, input: unknown, agentId: string): string | undefined {
+  const free = [...asks.entries()].filter(([id, one]) => one.tool === tool && one.agentId === agentId && !data.pending.some(item => item.id === id))
+  const exact = free.find(([, one]) => sameValue(one.input, input))
+  if (exact) return exact[0]
+  return free.length === 1 ? free[0]?.[0] : undefined
+}
+
+/**
+ * An AskUserQuestion call, raced. Its question is held on you (`pending`,
+ * its questions as the call gave them) and said in the asking agent's Talk;
+ * the dialog gets a line saying the deck answers too (where it takes one).
+ * Then the dialog runs beneath (`next`, called once: each call would open it
+ * again) while the page may answer: the deck's answer returns `{ result }`
+ * with the call's own `questions` passed through unchanged (the tool's
+ * output schema checks it), which cancels the dialog beneath; Claude Code's
+ * answer, or its idle timer's, returns what the dialog gave. An abandoned
+ * call (`next.signal`: an interrupt, a hook above settling first) ends the
+ * race with nothing answered. However it ends, the question is taken down,
+ * Talk says how it was answered, and the page's command, if one came, is
+ * told what came of it.
+ */
+async function raceDeck($: EngineInterface, e: ToolCallEvent, next: ToolCallNext, agentId: string, at: number): Promise<ToolCallResult> {
+  const id = e.tool_use_id
+  const input = e as unknown as Record<string, unknown>
+  const questions = M.questionsOf(input.questions)
+  // nothing the deck could show: the dialog alone
+  if (!id || questions.length === 0) return next(e)
+
+  try {
+    M.notePending(data, { id, agentId, kind: 'question', tool: 'AskUserQuestion', at, questions })
+    M.addMessage(data, { from: agentId, to: M.YOU, kind: 'question', text: M.questionsTextOf(questions), at, callId: id })
+    touched($, at)
+  } catch {
+    // the dialog asks whatever the deck makes of it
+  }
+  if (isWebOn()) {
+    try {
+      $.ui.notice(id, 'Also answerable in Eagle Eye')
+    } catch {
+      // a dialog that takes no line: the page answers all the same
+    }
+  }
+
+  type Won = { by: 'deck'; answer: DeckAnswer } | { by: 'engine'; ran: ToolCallResult } | { by: 'failed'; error: unknown } | { by: 'abort' }
+  // an answer from the page that lands while Claude Code's is settling loses, and is told so
+  const late: { answer?: DeckAnswer } = {}
+  let settle: ((won: Won) => void) | undefined
+  const onAbort = () => settle?.({ by: 'abort' })
+  const below = next(e)
+  // when the deck answers first the dialog's own end is abandoned, its rejection too
+  below.catch(() => undefined)
+  const won = await new Promise<Won>(resolve => {
+    settle = resolve
+    askers.set(id, answer => {
+      late.answer = answer
+      resolve({ by: 'deck', answer })
+    })
+    below.then(
+      ran => resolve({ by: 'engine', ran }),
+      error => resolve({ by: 'failed', error }),
+    )
+    if (next.signal.aborted) resolve({ by: 'abort' })
+    else next.signal.addEventListener('abort', onAbort, { once: true })
+  })
+  askers.delete(id)
+  next.signal.removeEventListener('abort', onAbort)
+
+  const answered = won.by === 'deck' ? won.answer : undefined
+  const ran: ToolCallResult = answered
+    ? ({ result: { questions: input.questions, answers: answered.answers } } as ToolCallResult)
+    : won.by === 'engine'
+      ? won.ran
+      : { deny: 'The question was left unanswered' }
+  const said = won.by === 'engine' && won.ran.deny === undefined && won.ran.isError !== true ? M.questionResultOf(won.ran.result) : undefined
+  const end: QuestionEnd = answered ? 'deck' : said ? (said.isIdle ? 'idle' : 'engine') : 'gone'
+  questionEnds.set(id, end)
+  keepAtMost(questionEnds, MOST_KEPT)
+  try {
+    const now = await $.clock.now()
+    M.dropPending(data, id)
+    if (answered) {
+      M.addMessage(data, { from: M.YOU, to: agentId, kind: 'choice', text: `You answered: ${M.answeredOf(questions, answered.answers)}`, at: now, callId: id, ...(answered.ackId ? { ackId: answered.ackId } : {}) })
+      await ack($, answered.ackId, 'answered', 'Claude carries on')
+    } else if (said) {
+      const words = M.answeredOf(questions, said.answers) || F.oneLine(said.response)
+      const how = said.isIdle ? 'Auto-answered after idle' : 'Answered in Claude Code'
+      M.addMessage(data, { from: M.YOU, to: agentId, kind: 'choice', text: words ? `${how}: ${words}` : how, at: now, callId: id })
+    }
+    if (!answered && late.answer) await ack($, late.answer.ackId, 'failed', end === 'idle' ? 'Auto-answered after idle' : end === 'engine' ? 'Already answered in Claude Code' : 'No longer pending')
+    touched($, now)
+  } catch {
+    // the answer stands whatever the deck makes of it
+  }
+  if (won.by === 'failed') throw won.error
+  return ran
+}
+
+/**
+ * An answer to the question held on call `callId`, from the web page (its
+ * `answer` command, `ackId` its id) or the pane's needs-you card (no ack):
+ * the one resolver both take. Checked as the page's command is
+ * (`W.routeOf`: one to four answers, none too long), then it settles that
+ * call's race (`answerQuestion`). Answers why it was refused; '' when it
+ * went to the race, which says what came of it.
+ */
+function answerCall($: EngineInterface, callId: string, answers: Record<string, string>, ackId: string): string {
+  const route = W.routeOf({ cmd: 'answer', callId, answers }, data)
+  if (route === null || route.kind !== 'answer') {
+    const why = 'Not an answer the deck can read'
+    void ack($, ackId, 'failed', why)
+    return why
+  }
+  return answerQuestion($, route.callId, route.answers, ackId)
+}
+
+/** Why the question held on call `callId` takes no answer from the deck (answered in Claude Code, by its idle timer, gone, or restored by a reload, which the deck may not answer); '' while its race runs here. */
+export function answerGoneOf(callId: string): string {
+  if (askers.has(callId)) return ''
+  const end = questionEnds.get(callId)
+  const item = M.pendingOf(data).find(one => one.id === callId)
+  if (end === 'engine') return 'Already answered in Claude Code'
+  if (end === 'idle') return 'Auto-answered after idle'
+  return item && end === undefined ? 'The deck cannot answer this one since it reloaded: answer it in Claude Code' : 'No longer pending'
+}
+
+/**
+ * The answer to the question held on call `callId`: it settles that call's
+ * race (`raceDeck`), which says what came of it. Refused, with why (the
+ * page's ack, and the answer), when nothing races there any more (answered
+ * in Claude Code, by its idle timer, or gone; or restored by a reload, which
+ * the deck may not answer), or when an answer is to no question that call
+ * asked; '' when it went to the race.
+ */
+function answerQuestion($: EngineInterface, callId: string, answers: Record<string, string>, ackId: string): string {
+  const item = M.pendingOf(data).find(one => one.id === callId)
+  const asker = askers.get(callId)
+  if (!asker) {
+    const why = answerGoneOf(callId)
+    void ack($, ackId, 'failed', why)
+    return why
+  }
+  const problem = W.answerProblemOf(item, answers)
+  if (problem || !item) {
+    void ack($, ackId, 'failed', problem || 'No longer pending')
+    return problem || 'No longer pending'
+  }
+  askers.delete(callId)
+  asker({ answers: W.answersFor(item, answers), ackId })
+  return ''
+}
+
+/** The pane's answer (a needs-you card's option, Other or Submit): the page's resolver (`answerCall`), what came of it in a toast. */
+function answerFromPane($: EngineInterface, callId: string, answers: Record<string, string>) {
+  const why = answerCall($, callId, answers, '')
+  $.ui.toast(why ? `Not answered: ${why}` : 'Answered: Claude carries on')
+  redraw($)
+}
+
+/** An answer given in the sample: its question taken down there alone (`W.answeredInSample`), nothing sent to Claude. */
+async function answerInSample($: EngineInterface, callId: string, answers: Record<string, string>): Promise<void> {
+  const answered = demo.v2 ? W.answeredInSample(demo.v2, callId, answers, await $.clock.now()) : null
+  if (!answered) return
+  demo.v2 = answered.state
+  const words = answered.words
+  demo.version += 1
+  $.ui.toast(`Sample data: you answered ${F.trunc(words, 120)}. Nothing was sent to Claude.`)
+  redraw($)
+}
+
+/** Marks the commits a shell command made as that agent's. */
+async function attributeCommits($: EngineInterface, agentId: string, before: string): Promise<void> {
+  const ran = await runGit($, before ? G.argv.newSince(before) : G.argv.recentHashes)
+  if (!ran.ok) return
+  const hashes = ran.out.split('\n').map(line => line.trim()).filter(Boolean)
+  const fresh = before ? hashes : hashes.slice(0, 1).filter(hash => hash !== currentGit().head)
+  for (const hash of fresh) data.commitsBy[hash] = agentId
+  const keys = Object.keys(data.commitsBy)
+  if (keys.length > 300) for (const old of keys.slice(0, keys.length - 300)) delete data.commitsBy[old]
+  if (fresh.length > 0) scheduleGit($, 200, true)
+  save($)
+}
+
+/**
+ * `/eagle-eye probe`: a pane of its own that settles in one look what a surface
+ * does with a `Client` (./ui/probe.client.tsx) beside native Text and an
+ * Svg. A diagnostic; the deck's screens read none of it.
+ */
+const PROBE = 'eagle-eye-probe'
+
+const probe: {
+  /** Bumped every 1500 ms while the pane is open; each bump redraws it, handing the Client new props. */
+  tick: number
+  timer?: Timer
+  /** The last `ui.message` the Client posted, as one line of JSON; '' before the first. */
+  message: string
+  /** The last `ui.fault` the Client raised. */
+  fault: { surface: RenderSurface; phase: string; reason: string } | null
+  /** Where the Client failed: those drawings leave it out (no fault loop) until the probe opens again. */
+  failedOn: Set<RenderSurface>
+} = { tick: 0, message: '', fault: null, failedOn: new Set() }
+
+/** Starts the probe's tick, or restarts it. */
+function startProbe($: EngineInterface) {
+  probe.timer?.cancel()
+  probe.timer = $.clock.every(1500, () => {
+    probe.tick += 1
+    redraw($)
+  })
+}
+
+function stopProbe() {
+  probe.timer?.cancel()
+  probe.timer = undefined
+}
+
+/**
+ * `/eagle-eye probe`: opens the probe afresh with the keyboard (Esc closes it),
+ * or closes it while it is open; the `ui.close` hook stops the tick.
+ */
+export async function toggleProbe($: EngineInterface): Promise<CommandRunResult> {
+  const panes = await $.ui.panes().catch(() => [])
+  if (panes.some(pane => pane.id === PROBE)) {
+    await $.ui.close({ id: PROBE })
+    return { text: 'Eagle Eye probe closed.' }
+  }
+  probe.tick = 0
+  probe.message = ''
+  probe.fault = null
+  probe.failedOn.clear()
+  const opened = await $.ui.open({ id: PROBE, title: 'Eagle Eye probe', focus: true, closeOnEscape: true, rows: 24 })
+  startProbe($)
+  return opened.isPlaced ? {} : { text: 'Eagle Eye probe is open and waiting for room: widen the window, or press ctrl+x then tab.' }
+}
+
+/** Plain data as one line of JSON, cut to fit a line. */
+function jsonLine(value: unknown): string {
+  let text: string
+  try {
+    text = JSON.stringify(value) ?? String(value)
+  } catch {
+    text = String(value)
+  }
+  return F.trunc(F.oneLine(text), 240)
+}
+
+/** The probe's own colours and label font: graphite ground, bone text, one copper accent (the screens' theme's, held here so the hooks module names no renderer file). */
+const PROBE_LOOK = { ground: '#161615', text: '#e9e4d8', copper: '#c9824f', font: "Bahnschrift,'Segoe UI',system-ui,sans-serif" } as const
+
+/**
+ * The probe's Svg: markup far wider than any slot (2400×160 over a 900×60
+ * viewBox), graphite ground, one 13px bone label carrying the tick `count`.
+ * (No `tick` here: the validator resolves the functions handed `$` by name.)
+ */
+function probeSvg(count: number): string {
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="160" viewBox="0 0 900 60">',
+    `<rect x="0" y="0" width="900" height="60" fill="${PROBE_LOOK.ground}"/>`,
+    `<text x="16" y="35" font-family="${PROBE_LOOK.font}" font-size="13" fill="${PROBE_LOOK.text}">tick ${count} &#183; this text is 13px</text>`,
+    '</svg>',
+  ].join('')
+}
+
+/**
+ * The probe pane, top to bottom: the site's numbers and a hex colour in
+ * native Text, the Client, an Svg without `isInteractive`, and the last
+ * `ui.message` and `ui.fault` the Client caused. `Client` and `Svg` are
+ * passed only where the surface draws them.
+ */
+function probeView(
+  ui: ReturnType<EngineInterface['ui']['resolve']>,
+  e: RenderInput<'Pane'>,
+  Client: Elements['desktop']['Client'] | undefined,
+  Svg: Elements['desktop']['Svg'] | undefined,
+): RenderElement {
+  const { Box, Text } = ui
+  const viewport = e.viewport ? `${e.viewport.columns}×${e.viewport.rows}` : 'none'
+  const fault = probe.fault
+  let client: RenderElement
+  if (!Client) client = <Text dimColor>{`No Client on ${e.surface}: its element table has none.`}</Text>
+  else if (probe.failedOn.has(e.surface)) client = <Text dimColor>{`The Client is left out here after its fault; /eagle-eye probe twice draws it again.`}</Text>
+  else client = <Client key="probe" module="./ui/probe.client.tsx" width="100%" props={{ tick: probe.tick, cols: e.props.bodyColumns }} />
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Box flexDirection="row" columnGap={2}>
+        <Text>{`bodyColumns=${e.props.bodyColumns}  viewport=${viewport}  placement=${e.props.placement}  bodyRows=${e.props.scroll.bodyRows}  surface=${e.surface}`}</Text>
+        <Text color={PROBE_LOOK.copper}>copper hex</Text>
+      </Box>
+      {client}
+      {Svg ? (
+        <Svg source={probeSvg(probe.tick)} alt={`tick ${probe.tick}: 13px bone text on graphite, markup 2400×160 over a 900×60 viewBox`} />
+      ) : (
+        <Text dimColor>{`No Svg on ${e.surface}.`}</Text>
+      )}
+      <Box flexDirection="column">
+        <Text dimColor>{`ui.message: ${probe.message || 'none yet'}`}</Text>
+        <Text dimColor>{`ui.fault: ${fault ? `${fault.phase} on ${fault.surface}: ${fault.reason}` : 'none'}`}</Text>
+      </Box>
+    </Box>
+  )
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    // /eagle-eye before anything else is awaited: a reload drops the old registration, and the menu (the terminal's
+    // typeahead, a desktop session's list) goes without /eagle-eye until this runs
+    try {
+      await $.command.register({
+        name: 'eagle-eye',
+        description: 'Open Eagle Eye: what Claude is doing, who is working on what, and what needs you (/eagle-eye dashboard, chat, org, changes, inspect or settings; /eagle-eye demo: sample data; /eagle-eye web: in your browser)',
+        // now (the Dashboard's id), help (Settings) and probe (a dev check) still open, unlisted
+        argumentHint: '[dashboard|chat|org|changes|inspect|settings|demo|web|web stop|clear|clear show|band|avatars [style]|close]',
+        immediate: true,
+      })
+    } catch (error) {
+      $.ui.log(`could not add /eagle-eye: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    const now = await $.clock.now()
+    cwd = e.cwd
+    debug.loadedAt = now
+    await checkDebug($, true)
+    const isRestored = await restore($, now)
+    if (!isRestored) {
+      data = M.emptyData(now)
+      view = M.defaultView()
+    }
+    // Claude Code's SessionStart, heard just before: whether the session is a fork (a reload hears none, its snapshot keeping it)
+    if (startedAs !== '') noteStart(startedAs)
+
+    try {
+      const prefs = await $.store.get('prefs')
+      if (prefs && typeof prefs === 'object' && 'isBandHidden' in prefs) view.isBandHidden = Boolean((prefs as { isBandHidden: unknown }).isBandHidden)
+      // the avatar style is the person's own: it holds in every session (blocks until they pick another)
+      if (prefs && typeof prefs === 'object' && 'avatarStyle' in prefs) view.avatarStyle = AV.styleOf((prefs as { avatarStyle: unknown }).avatarStyle)
+    } catch {
+      // defaults stand
+    }
+
+    try {
+      const panes = await $.ui.panes()
+      isPaneOpen = panes.some(pane => pane.id === PANE)
+      // a reload drops the probe's tick with the old environment: start it again while its pane stays up
+      if (panes.some(pane => pane.id === PROBE)) startProbe($)
+    } catch {
+      isPaneOpen = false
+    }
+
+    try {
+      sessionId = await $.session.id()
+    } catch {
+      sessionId = ''
+    }
+    setPluginRoot($.plugin.root.replace(/[\\/]+$/, ''))
+    // Eagle Eye's home: the gone sessions' folders swept, this one's made private before any deck writes there (never awaited)
+    await homeOf($)
+    void startHome($)
+    // every session on this machine: this deck's file in the registry, and the others' read (never awaited)
+    void SR.startRegistry(registryHost($))
+
+    // the web deck's supervisor, this session.start's: on again at once when a reload found it on
+    startSupervisor($)
+
+    try {
+      const raw = await $.session.usage()
+      usage = usageOf(raw)
+      usageAt = now
+      if (!isRestored) data.startedAt = raw.startedAt
+    } catch {
+      // the session's start stays the module's first look
+    }
+
+    try {
+      const main = M.agentOf(data, M.MAIN)
+      if (main && !main.model) main.model = await $.session.model()
+    } catch {
+      // the model shows once a request reports it
+    }
+
+    // Inspect: what is loaded and the context, read in the background
+    void readInspected($)
+
+    // a reload while the sample showed reads it again, on the tab and page it was on
+    if (view.isDemo) void loadDemo($, false)
+
+    void startRepos($)
+    void syncAgents($)
+    // what a reload lost (the goal, an ended agent's result), read back from the transcripts: never awaited, it redraws when done
+    void recoverLost($)
+    timers.tick = $.clock.every(2500, () => void tick($))
+
+    return next(e)
+  })
+
+  // a /clear or a resume: the process goes on, and the deck with it under the id it started with (no session.start comes); what the folder held of the conversation before goes
+  on('session.end', { reason: ['clear', 'resume'] }, async ($, e, next) => {
+    const result = await next(e)
+    const now = await $.clock.now()
+    data = M.emptyData(now)
+    closeCommit()
+    closeFileDiff()
+    await clearWeb($)
+    changed($)
+    return result
+  })
+
+  // the session ends (not a /clear or a resume, where the process goes on): its file in the registry goes, then its state folder
+  on('session.end', async ($, e, next) => {
+    const result = await next(e)
+    await SR.endRegistry(e.reason)
+    if (e.reason !== 'clear' && e.reason !== 'resume') {
+      await endWeb($)
+      // the snapshot the host held of this session (its conversation) is cleared: nothing of it is kept once the session is over
+      timers.save?.cancel()
+      timers.save = undefined
+      const now = await $.clock.now()
+      await $.state.set(SNAPSHOT, M.copyOf({ v: M.SNAPSHOT_VERSION, data: M.emptyData(now), view: M.defaultView() })).catch(() => undefined)
+    }
+    return result
+  })
+
+  on('command.run', { command: 'eagle-eye' }, async ($, e) => runEagleEye($, e))
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    isPaneOpen = false
+    paneFocus = ''
+    chatFollow.isShown = false
+    return result
+  })
+
+  // the probe closes by /eagle-eye probe, Esc or its close mark: its tick stops
+  on('ui.close', { id: PROBE }, async ($, e, next) => {
+    const result = await next(e)
+    stopProbe()
+    return result
+  })
+
+  on('tool.call', async ($, e, next) => {
+    // the deck's own calls are no agent's work
+    if (next.origin.plugin === $.plugin.name) return next(e)
+    const start = await $.clock.now()
+    const input = e as unknown as Record<string, unknown>
+    const tool = String(e.tool)
+    const agentId = e.agentId ?? M.MAIN
+    const command = typeof input.command === 'string' ? input.command : ''
+    const isShell = M.SHELL_TOOLS.includes(tool)
+    const isEdit = M.EDIT_TOOLS.includes(tool)
+    const isSpawn = tool === 'Agent' || (tool === 'Task' && typeof input.prompt === 'string')
+    let agent: DeckAgent | undefined
+
+    try {
+      // a loop no spawn named is a workflow's agent while a run is live, else the engine's own
+      agent = M.seeLoop(data, agentId, start)
+      // a call is work: an ended agent (a message woke it) or an idle teammate runs again
+      if (M.isEnded(agent.status) || agent.status === 'idle') M.reopen(agent, start)
+      delete agent.endedAt
+      // a new call means the agent no longer waits on you: clear its needs-you notes, and drop its calls a reload left marked as waiting on you (they have ended)
+      M.clearNeeds(data, { kind: 'start', agent: agentId })
+      M.dropStale(data, agentId, openCalls)
+      if (e.tool_use_id) openCalls.add(e.tool_use_id)
+      const file = typeof input.file_path === 'string' ? input.file_path : ''
+      const said = file ? { ...input, file_path: knownRealOf(file) } : input
+      const activity = M.activityOf(e.tool_use_id, tool, said, currentGit().root || null, start, data.board)
+      M.beginTool(data, agent, activity)
+      inspectCalled(data, tool, input, start)
+      // the call is recorded at once; if its directory is not resolved yet, its target is rewritten once the file system resolves it
+      if (file && !isSpelledOf(file)) void respell($, activity, tool, input, file)
+    } catch {
+      agent = undefined
+    }
+    try {
+      // an Agent call shows its agent at once, keyed by the call until the spawn binds it
+      if (isSpawn) {
+        M.addPlaceholder(data, {
+          toolUseId: e.tool_use_id,
+          parentId: agentId,
+          ...(typeof input.name === 'string' ? { name: input.name } : {}),
+          description: typeof input.description === 'string' ? input.description : '',
+          prompt: typeof input.prompt === 'string' ? input.prompt : '',
+          ...(typeof input.subagent_type === 'string' ? { type: input.subagent_type } : {}),
+          at: start,
+        })
+      }
+      if (tool === 'Workflow') {
+        const meta = typeof input.script === 'string' ? M.workflowMetaOf(input.script) : undefined
+        const named = typeof input.name === 'string' ? input.name : ''
+        M.noteWorkflow(data, { id: e.tool_use_id, caller: agentId, name: meta?.name || named, phases: meta?.phases ?? [], at: start })
+      }
+      // background work it starts (a shell in the background, Monitor, Workflow, CronCreate, ScheduleWakeup): its row at once
+      B.noteStart(data, { toolUseId: e.tool_use_id, tool, input, by: agentId, at: start })
+      touched($, start)
+    } catch {
+      // the call goes ahead whatever the deck makes of it
+    }
+
+    // a SendMessage's own summary titles the row its send logs
+    const summary = tool === 'SendMessage' && typeof input.summary === 'string' ? F.trunc(F.oneLine(input.summary), 200) : ''
+    if (summary !== '' && typeof input.message === 'string') {
+      sendTitles.push({ id: e.tool_use_id, from: agentId, text: input.message, summary })
+      if (sendTitles.length > 20) sendTitles.splice(0, sendTitles.length - 20)
+    }
+    const before = isShell && currentGit().isRepo && G.mayCommit(command) ? await runGit($, G.argv.head).then(ran => (ran.ok ? ran.out.trim() : '')) : ''
+    let ran: ToolCallResult
+    try {
+      // a question the deck may answer too: raced with its dialog beneath
+      ran = tool === 'AskUserQuestion' ? await raceDeck($, e, next, agentId, start) : await next(e)
+    } finally {
+      // the call ended (answered, run, refused or failed): nothing of it is held on you any more
+      openCalls.delete(e.tool_use_id)
+      if (summary !== '') {
+        const at = sendTitles.findIndex(one => one.id === e.tool_use_id)
+        if (at >= 0) sendTitles.splice(at, 1)
+      }
+      asks.delete(e.tool_use_id)
+      M.dropPending(data, e.tool_use_id)
+    }
+
+    let end = start
+    let ok = false
+    try {
+      end = await $.clock.now()
+      ok = ran.deny === undefined && ran.isError !== true
+      // Inspect: the call ran (its permission was given), or it was refused (Claude Code hands a refusal back as an error that no PostToolUse heard)
+      inspectEnded(data, e.tool_use_id, ran)
+      if (agent) {
+        M.endTool(agent, e.tool_use_id, ok, end)
+        // a permission prompt holds its call: the call's end is the person's answer
+        M.clearNeeds(data, { kind: 'end', agent: agentId, call: e.tool_use_id })
+      }
+    } catch {
+      // tracking never changes what the tool returned
+    }
+    const record = ran.result !== null && typeof ran.result === 'object' ? (ran.result as Record<string, unknown>) : null
+
+    // the files it changed, spelled as the file system does (an 8.3 short name made long), so git's paths match
+    let shellEdits = 0
+    if (ok && agent) {
+      try {
+        const named = isEdit ? editedPathOf(input) : ''
+        if (named) recordEdit(agent, tool, e.tool_use_id, input, ran, end, await realPathOf($, named))
+        if (tool === 'Bash') shellEdits = await recordShellEdits($, agent, tool, e.tool_use_id, ran, end)
+      } catch {
+        // an edit the deck could not read is left out
+      }
+    }
+
+    // its lists: the whole todo list, and the task board
+    if (ok && agent) {
+      try {
+        if (M.LIST_TOOLS.includes(tool)) M.noteTodo(data, agent, tool, input, ran.result, end)
+        if (M.TASK_TOOLS.includes(tool)) M.noteBoard(data, agent, tool, input, ran.result, end)
+      } catch {
+        // a list the deck could not read is left out
+      }
+    }
+
+    // an Agent call's row: bound to the agent its result names, or ended when none started; a foreground agent's report
+    if (isSpawn) {
+      try {
+        const status = typeof record?.status === 'string' ? record.status : ''
+        const handback = record?.handbackReport
+        const report =
+          handback && typeof handback === 'object' && typeof (handback as { text?: unknown }).text === 'string'
+            ? String((handback as { text: string }).text)
+            : Array.isArray(record?.content)
+              ? (record.content as unknown[]).map(block => (block && typeof block === 'object' && typeof (block as { text?: unknown }).text === 'string' ? (block as { text: string }).text : '')).join('\n')
+              : ''
+        M.settleAgentCall(data, {
+          toolUseId: e.tool_use_id,
+          ...(typeof record?.agentId === 'string' && record.agentId !== '' ? { agentId: record.agentId } : {}),
+          isStarted: ok,
+          why: ran.deny ?? (typeof ran.text === 'string' ? ran.text : ''),
+          ...(ok && status === 'completed' && report.trim() !== '' ? { report } : {}),
+          isDone: ok && status === 'completed',
+          isRemote: status === 'remote_launched',
+          at: end,
+        })
+      } catch {
+        // the call's agent stands as its spawn left it
+      }
+    }
+
+    // an agent's report: SubagentHandback's message, its result whatever its turn's answer says
+    if (ok && agent && tool === 'SubagentHandback') {
+      try {
+        if (typeof input.message === 'string') M.noteResult(data, agent, input.message, end, 'handback')
+      } catch {
+        // the report stands in the agent's own transcript
+      }
+    }
+
+    // the plan the person approved
+    if (ok && tool === 'ExitPlanMode' && record?.awaitingLeaderApproval !== true) {
+      try {
+        let plan = typeof record?.plan === 'string' ? record.plan : typeof input.plan === 'string' ? input.plan : ''
+        if (plan.trim() === '' && typeof record?.filePath === 'string' && record.filePath !== '') plan = await $.fs.read(record.filePath)
+        if (plan.trim() !== '') {
+          // as Claude wrote it, for the plan it is; and split into steps
+          M.noteApproved(data, plan, agentId, end)
+          M.notePlan(data, plan, end)
+        }
+      } catch {
+        // no plan the deck could read
+      }
+    }
+
+    // a Workflow run's ids, or its end when it never launched; a TaskStop of one ends it
+    try {
+      if (tool === 'Workflow') {
+        const text = (field: string) => (typeof record?.[field] === 'string' ? (record[field] as string) : undefined)
+        M.launchWorkflow(data, e.tool_use_id, { ok, at: end, ...(text('runId') ? { runId: text('runId') } : {}), ...(text('taskId') ? { taskId: text('taskId') } : {}), ...(text('workflowName') ? { name: text('workflowName') } : {}) })
+      }
+      if (ok && tool === 'TaskStop') M.endWorkflows(data, String(input.task_id ?? input.shell_id ?? ''), end)
+    } catch {
+      // the run stands as it was
+    }
+
+    try {
+      // background work: its row takes Claude Code's id, or goes (it never started, or TaskStop or CronDelete ended it)
+      B.noteEnd(data, { toolUseId: e.tool_use_id, tool, input, by: agentId, at: start, ok, result: ran.result })
+    } catch {
+      // the row stands as it was
+    }
+
+    try {
+      if (isEdit || shellEdits > 0 || (isShell && G.mayChangeTree(command))) scheduleGit($, 700)
+      // a commit the shell reports by its sha is this agent's; else git is asked what is new
+      const operation = record?.gitOperation
+      const commit = operation && typeof operation === 'object' ? (operation as { commit?: { sha?: unknown } }).commit : undefined
+      if (ok && commit && typeof commit.sha === 'string' && commit.sha !== '') {
+        data.commitsBy[commit.sha] = agentId
+        scheduleGit($, 200, true)
+      } else if (isShell && ok && G.mayCommit(command)) {
+        void attributeCommits($, agentId, before)
+      }
+      touched($, end)
+    } catch {
+      // tracking never changes what the tool returned
+    }
+
+    return ran
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const now = await $.clock.now()
+      const parentId = e.parentAgentId ?? M.MAIN
+      // a message woke a finished agent (SendMessage to it), or Claude Code brought one back: the same agent resumed, no new spawn
+      const resumed = e.resume && result.agentId ? M.noteResume(data, result.agentId, now) : undefined
+      if (resumed) {
+        logResumeWords(resumed, resumed.parentId ?? parentId, e.prompt, now)
+      } else if (result.agentId) {
+        if (parentId !== M.MAIN) M.seeLoop(data, parentId, now)
+        // the row its Agent call made takes the agent's id: the same row, never a second one
+        const { agent } = M.noteSpawn(data, {
+          toolUseId: e.tool_use_id,
+          agentId: result.agentId,
+          parentId,
+          ...(e.name ? { name: e.name } : {}),
+          description: e.description,
+          prompt: e.prompt,
+          type: e.subagentType,
+          isTeammate: e.isTeammate === true,
+          ...(e.workflow ? { workflow: e.workflow.runId } : {}),
+          model: result.model,
+          background: e.background === true,
+          at: now,
+        })
+        if (e.resume) {
+          // resumed, though the deck never saw it start (a reload lost it): its words a message, once
+          agent.resumedAt = now
+          logResumeWords(agent, agent.parentId ?? parentId, e.prompt, now)
+        } else if (!e.workflow) {
+          // a workflow's agents fold into one row: their hand-offs stay in the run
+          M.addMessage(data, { from: agent.parentId ?? parentId, to: agent.id, kind: 'spawn', text: e.prompt, at: now })
+        }
+      } else if (result.deny !== undefined && !e.workflow && !e.resume) {
+        M.settleAgentCall(data, { toolUseId: e.tool_use_id, isStarted: false, why: result.deny, at: now })
+      }
+      touched($, now)
+    } catch {
+      // the spawn stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  // the person's own words: a new goal, or a follow-up of the one in hand; anything else is an event
+  on('prompt.submit', async ($, e, next) => {
+    let kind: M.PromptKind = 'event'
+    try {
+      kind = M.promptKindOf(data, e)
+    } catch {
+      kind = 'event'
+    }
+    const isDecks = e.origin.kind === 'plugin' && e.origin.name === $.plugin.name
+    // the deck's prompt asking the Orchestrator to pass your words to a subagent is no goal of yours, nor a follow-up
+    if (isDecks && isRelayPrompt(e.text)) kind = 'event'
+    // the turn it starts begins inside next(e): noted first, so that turn knows whose words it starts with
+    const command = e.command ? M.commandOf(e.command) : ''
+    const entry = noteSubmitted(e.text, M.isUsersWords(e.origin), e.turnId !== undefined, command)
+    const result = await next(e)
+    if (result.drop !== undefined) dropSubmitted(entry)
+    else entry.isSettled = true
+    try {
+      const now = await $.clock.now()
+      let isChanged = false
+      if (result.drop === undefined) {
+        // the deck's own prompt, logged as your message when it was sent (a relay, in its agent's Talk): the turn it starts logs it no second time
+        if (isDecks) {
+          markDeckPrompt(e.text)
+          markRelayPrompt(e.text)
+        }
+        const said = expansion !== null && now - expansion.at < 10_000 ? expansion.headline : ''
+        expansion = null
+        // a slash command typed alone asks Claude for nothing, unless it expands to a prompt (a skill or a command's file: "/open-sourcing"): then it is a request like typed words
+        const isBareCommand = kind === 'event' && !isDecks && M.isUsersWords(e.origin) && M.commandLineOf(e.text) !== ''
+        if (isBareCommand && said) kind = M.promptKindOf(data, { origin: e.origin, ...(e.turnId !== undefined ? { turnId: e.turnId } : {}) })
+        // its expansion may come after the submit resolves: kept, so the expansion makes it the request then
+        pendingCommand = isBareCommand && !said ? { text: e.text, origin: e.origin, ...(e.turnId !== undefined ? { turnId: e.turnId } : {}), at: now } : null
+        if (kind !== 'event') isChanged = M.noteGoal(data, kind, { text: e.text, origin: e.origin.kind, at: now, ...(kind === 'goal' && said ? { headline: said } : {}) }) !== undefined
+        // typed during a running turn: log it now, as submitted, and note it so the turn it may start does not log it again (a slash command run alone is logged as the command you ran)
+        if (e.turnId !== undefined && !isDecks && M.isUsersWords(e.origin)) {
+          const words = 'text' in result && typeof result.text === 'string' ? result.text : e.text
+          const logged = M.addPrompt(data, { text: words, at: now, ...(command ? { command } : {}) })
+          if (data.messages.includes(logged)) {
+            noteTypedMidTurn(words)
+            isChanged = true
+          }
+        }
+        // a background task's notification: Claude Code's row to the main loop, and it may end a Workflow run
+        if (e.origin.kind === 'task-notification') {
+          isChanged = M.noteTaskNotices(data, e.text, now) || isChanged
+          isChanged = M.endWorkflows(data, e.text, now) || isChanged
+          // a background task's notification that it ended takes its row down (the timeline keeps it to now)
+          isChanged = B.noteTaskEnds(data, e.text, now) || isChanged
+        }
+        // a cron or a wakeup fired: a one-shot one is done, a recurring one's next run unknown
+        if (e.origin.kind === 'scheduled-trigger') isChanged = B.noteFired(data, e.text) || isChanged
+      }
+      if (isChanged) touched($, now)
+    } catch {
+      // the prompt goes in whatever the deck makes of it
+    }
+    return result
+  })
+
+  // a slash command's own words make a better headline than the prompt it expands to
+  on('classic.UserPromptExpansion', async ($, e, next) => {
+    try {
+      const now = await $.clock.now()
+      const args = F.oneLine(e.command_args)
+      const headline = `/${e.command_name}${args ? ` ${args}` : ''}`
+      const goal = M.goalOf(data)
+      const expanded = F.oneLine(e.prompt).slice(0, 60)
+      const isThisGoal = goal !== undefined && now - goal.at < 5_000 && (goal.text.trim().startsWith(`/${e.command_name}`) || (expanded !== '' && F.oneLine(goal.text).includes(expanded)))
+      const pending = pendingCommand
+      pendingCommand = null
+      if (isThisGoal) {
+        if (M.retitleGoal(data, headline, goal.at)) touched($, now)
+      } else if (pending && now - pending.at < 5_000 && pending.text.trim().startsWith(`/${e.command_name}`)) {
+        // the command was submitted alone and read as asking nothing: its expansion says it asks Claude for something
+        const kind = M.promptKindOf(data, { origin: pending.origin, ...(pending.turnId !== undefined ? { turnId: pending.turnId } : {}) })
+        if (kind !== 'event' && M.noteGoal(data, kind, { text: pending.text, origin: pending.origin.kind, at: pending.at, ...(kind === 'goal' ? { headline } : {}) }) !== undefined) touched($, now)
+      } else {
+        expansion = { headline, at: now }
+      }
+    } catch {
+      // the prompt keeps its own first line
+    }
+    return next(e)
+  })
+
+  on('turn.start', async ($, e, next) => {
+    // a subagent's or teammate's run starts a turn of its own (engine 2.1.304): none of it is the main loop's
+    if (e.agentId !== undefined) return next(e)
+    // the prompt it starts with, noted by prompt.submit before its next(e): taken before anything is awaited
+    const prompt = takeSubmitted(e.text)
+    try {
+      const now = await $.clock.now()
+      const main = M.agentOf(data, M.MAIN)
+      // the main loop's running turn: the one Stop turn ends ($.turn.abort takes its id)
+      M.noteMainTurn(data, e.turnId, now)
+      // you answered, or the Orchestrator went on by itself: it waits on nobody
+      M.clearNeeds(data, { kind: 'turn' })
+      if (main) {
+        main.status = 'running'
+        main.lastAt = now
+      }
+      // the prompt is not yours if it came from elsewhere (an agent's hand-back, already recorded as its result) or if it
+      // opens with a notice: a background agent's <task-notification> can start a turn with no prompt.submit before it
+      const isTheirs = (prompt?.isTheirs ?? true) && !M.isNoticeText(e.text)
+      // your words from the deck were logged when you sent them; a relay of them to a subagent goes in no Talk of the Orchestrator's
+      const isDecks = takeRelayTurn(e.text, e.turnId) !== undefined || takeDeckPrompt(e.text)
+      // a prompt you typed over the turn before was logged as you typed it
+      const isTyped = isTheirs && !isDecks && takeTypedMidTurn(e.text)
+      // a slash command run alone ("/login") is the command you ran, not words of yours
+      if (e.text.trim() && isTheirs && !isDecks && !isTyped) M.addPrompt(data, { text: e.text, at: now, ...(prompt?.command ? { command: prompt.command } : {}) })
+      // a turn the engine starts with a background task's notification, no prompt.submit before it: Claude Code's row, once
+      if (M.isNoticeText(e.text)) M.noteTaskNotices(data, e.text, now)
+      // and a background task it says ended takes its row down (the timeline keeps it to now)
+      if (M.isNoticeText(e.text)) B.noteTaskEnds(data, e.text, now)
+      // a new turn: no call of the Orchestrator's last one is held on you any more
+      M.dropStale(data, M.MAIN, openCalls)
+      touched($, now)
+    } catch {
+      // a turn starts whatever the deck makes of it
+    }
+    return next(e)
+  })
+
+  on('turn.step', async function* ($, e, next) {
+    const id = e.agentId ?? M.MAIN
+    // a new step means every call of the loop's last step has ended, so drop its calls a reload left marked as waiting on you
+    const isStale = data.pending.length > 0 && M.dropStale(data, id, openCalls)
+    // you messaged it from the deck: a step it starts now may read your words, and answer them
+    const awaited = e.agentId !== undefined ? replies.get(e.agentId) : undefined
+    const startedAt = awaited || isStale ? await $.clock.now() : 0
+    if (isStale) touched($, startedAt)
+    // the response as it streams: each chunk goes on at once, as it came; what Claude Code shows of the thinking is read on the way
+    const stream = next(e)
+    const thinking: Thinking = { text: '', block: -1 }
+    for await (const chunk of stream) {
+      if (chunk.kind === 'thinking') keepThinking(thinking, chunk)
+      yield chunk
+    }
+    const result = await stream.result
+    let isReply = false
+    try {
+      if (awaited && e.agentId !== undefined && replies.get(e.agentId) === awaited && startedAt > awaited.since) {
+        // its first words since your message: said to nobody in particular, so never taken to be to you
+        if (result.answer.trim() !== '') {
+          replies.delete(e.agentId)
+          isReply = true
+          const now = await $.clock.now()
+          M.addMessage(data, { from: e.agentId, to: '', kind: 'chat', text: result.answer, at: now })
+          touched($, now)
+        } else {
+          awaited.isRead = true
+        }
+      }
+    } catch {
+      // the reply stands in the agent's own transcript
+    }
+    try {
+      // what the step gave besides its calls: its thinking as Claude Code showed it, then its visible text; kept on its loop's row, never in Chat
+      const agent = M.agentOf(data, id)
+      if (agent && (thinking.text.trim() !== '' || result.answer.trim() !== '')) {
+        const now = await $.clock.now()
+        const step = { at: now, turnId: e.turnId, step: e.index }
+        M.noteWord(agent, { ...step, kind: 'thought', text: thinking.text })
+        // a step that asks for no call ends its turn: its text is the turn's answer, which Chat has (the Orchestrator's answer to you, an agent's result)
+        M.noteWord(agent, { ...step, kind: 'said', text: result.answer, isChat: isReply || result.toolUses.length === 0 })
+        touched($, now)
+      }
+    } catch {
+      // the words stand in the agent's own transcript
+    }
+    try {
+      const usageOfStep = result.usage
+      const agent = M.agentOf(data, id)
+      if (usageOfStep && agent) {
+        const now = await $.clock.now()
+        agent.tokensIn += usageOfStep.input_tokens + usageOfStep.cache_creation_input_tokens
+        agent.cacheRead += usageOfStep.cache_read_input_tokens
+        agent.tokensOut += usageOfStep.output_tokens
+        agent.requests += 1
+        agent.lastAt = now
+        if (!agent.model) agent.model = usageOfStep.model
+        // a step of an ended agent's loop (a message woke it), or of an idle teammate's, is a new run
+        if (agent.kind !== 'main' && (M.isEnded(agent.status) || agent.status === 'idle')) M.reopen(agent, now)
+        M.bump(data, now, 'tokens', usageOfStep.input_tokens + usageOfStep.output_tokens + usageOfStep.cache_creation_input_tokens + usageOfStep.cache_read_input_tokens)
+        touched($, now)
+      }
+    } catch {
+      // counting tokens never changes the response
+    }
+    return result
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const now = await $.clock.now()
+      // its run ended: no call of it is held on you any more
+      M.dropStale(data, e.agentId ?? M.MAIN, openCalls)
+      if (e.agentId) {
+        // a loop no spawn and no list named that the list still leaves out was Claude Code's own (a prompt suggestion, a compaction): forgotten
+        if (M.isEngineLoopId(data, e.agentId)) await syncAgents($)
+        const agent = M.forgetLoop(data, e.agentId) ? undefined : M.agentOf(data, e.agentId)
+        if (agent) {
+          agent.status = e.reason === 'aborted' ? 'killed' : e.reason === 'answer' ? (agent.kind === 'teammate' ? 'idle' : 'completed') : 'failed'
+          agent.endedAt = now
+          delete agent.current
+          delete agent.todo
+          // its answer is its result unless it handed a report back (whose turn answers "")
+          if (e.answer.trim()) M.noteResult(data, agent, e.answer, now, 'answer')
+        }
+        // a run that read your message and ended without a word for you: no reply is coming
+        if (replies.get(e.agentId)?.isRead) replies.delete(e.agentId)
+      } else {
+        const main = M.agentOf(data, M.MAIN)
+        // no turn of the main loop's runs now: nothing for Stop turn to end
+        M.endMainTurn(data, e.turnId, now)
+        // a relay turn passed your words on to a subagent (or failed to, which its ack says): nothing of it is an answer to you
+        const isRelay = endRelay($, e.turnId, e.answer)
+        if (main) {
+          main.status = 'idle'
+          delete main.current
+          main.lastAt = now
+          delete main.todo
+          // its answer to you is its latest report (the web deck's Orchestrator shows it), and its reply in your Talk
+          if (!isRelay) {
+            M.noteMainAnswer(main, e.answer)
+            if (e.answer.trim()) M.addMessage(data, { from: M.MAIN, to: M.YOU, kind: 'answer', text: e.answer, at: now })
+          }
+        }
+        data.turns += 1
+        data.turnMs += e.durationMs
+      }
+      scheduleGit($, 300)
+      touched($, now)
+    } catch {
+      // the turn's end stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  // a subagent the deck saw end runs again; one it never saw spawn waits for its first call. Claude Code raises this only for agents'
+  // runs, so a loop the deck took for the engine's own is that agent, and the agent list is read for the rest of its details
+  on('classic.SubagentStart', async ($, e, next) => {
+    try {
+      const isEngine = M.isEngineLoopId(data, e.agent_id)
+      const now = await $.clock.now()
+      if (M.noteSubagentStart(data, e.agent_id, e.agent_type, now)) touched($, now)
+      if (isEngine && !M.isEngineLoopId(data, e.agent_id)) void syncAgents($)
+    } catch {
+      // the start stands whatever the deck makes of it
+    }
+    return next(e)
+  })
+
+  // a subagent stopped: its row ends at once, and with no report handed back its last message is its result. A loop that no spawn, agent
+  // list or SubagentStart named, and that the list still leaves out, was Claude Code's own (a prompt suggestion, whose last words guess your next prompt): forget it
+  on('classic.SubagentStop', async ($, e, next) => {
+    const seen = await $.clock.now()
+    const result = await next(e)
+    try {
+      // a stop a hook blocked goes on working
+      if (result.block === undefined) {
+        if (M.isEngineLoopId(data, e.agent_id)) await syncAgents($)
+        const now = await $.clock.now()
+        if (M.forgetLoop(data, e.agent_id) || M.noteStop(data, e.agent_id, e.last_assistant_message ?? '', now)) touched($, now)
+      }
+      // Claude Code's snapshot of the background work, as it stood when the stop was raised
+      if (noteBackground(e, seen)) touched($, seen)
+    } catch {
+      // the stop stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  // Claude stopped: Claude Code's snapshot of the background work (its tasks and schedules) brings Background up to date, and its input names the main loop's permission mode and effort (Inspect). Observe only.
+  on('classic.Stop', async ($, e, next) => {
+    const seen = await $.clock.now()
+    const result = await next(e)
+    try {
+      const isBackground = noteBackground(e, seen)
+      if (inspectMode(data, e) || isBackground) touched($, seen)
+    } catch {
+      // the stop stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  // a teammate between turns: its row ends at once
+  on('classic.TeammateIdle', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      if (result.block === undefined) {
+        const now = await $.clock.now()
+        if (M.noteIdle(data, { ...(e.agent_id ? { id: e.agent_id } : {}), name: e.teammate_name }, now)) touched($, now)
+      }
+    } catch {
+      // the teammate idles whatever the deck makes of it
+    }
+    return result
+  })
+
+  // the task board, as the team's own events tell it
+  on('classic.TaskCreated', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      if (result.block === undefined) {
+        const now = await $.clock.now()
+        const by = e.teammate_name ? M.resolveRecipient(data, e.teammate_name)?.id : e.agent_id
+        const task = { id: e.task_id, subject: e.task_subject, ...(e.task_description ? { description: e.task_description } : {}), ...(by ? { by } : {}) }
+        if (M.noteTaskEvent(data, 'created', task, now)) touched($, now)
+      }
+    } catch {
+      // the task stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  on('classic.TaskCompleted', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      if (result.block === undefined) {
+        const now = await $.clock.now()
+        const by = e.teammate_name ? M.resolveRecipient(data, e.teammate_name)?.id : e.agent_id
+        const task = { id: e.task_id, subject: e.task_subject, ...(e.task_description ? { description: e.task_description } : {}), ...(by ? { by } : {}) }
+        if (M.noteTaskEvent(data, 'completed', task, now)) touched($, now)
+      }
+    } catch {
+      // the task stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  on('session.send', async ($, e, next) => {
+    // if this send wakes a finished agent, the resume is raised inside next(e): this entry tells the resume that the send logs the message
+    const flight = { from: e.agentId ?? M.MAIN, to: typeof e.to === 'string' ? e.to : '', text: e.text }
+    sendsInFlight.push(flight)
+    let result: Awaited<ReturnType<typeof next>>
+    try {
+      result = await next(e)
+    } finally {
+      sendsInFlight.splice(sendsInFlight.indexOf(flight), 1)
+    }
+    try {
+      const isMine = e.origin.kind === 'plugin' && e.origin.name === $.plugin.name
+      if (!isMine) {
+        const now = await $.clock.now()
+        const from = e.agentId ?? M.MAIN
+        if (from !== M.MAIN) M.seeLoop(data, from, now)
+        // a name two agents carried goes to the newest live one; a name none carries stays the name SendMessage was given
+        const target = M.resolveRecipient(data, e.to)
+        const to = target?.id ?? F.trunc(F.oneLine(e.to), 120)
+        // the Orchestrator passing your words on (a relay): your message, now delivered, and no second one
+        const relay = from === M.MAIN && e.origin.kind === 'model' && result.isDelivered && target ? passRelay(target.id, e.text) : undefined
+        const title = e.origin.kind === 'model' ? sendTitleOf(from, e.text) : ''
+        // the resume it caused logged its words already (raised before this send): that row is this send's
+        const woke = M.loggedSendOf(data, { to, text: e.text, at: now })
+        const resumeRow = woke && resumeRows.includes(woke.id) ? woke : undefined
+        if (relay) await relayPassed($, relay, now)
+        else if (resumeRow) {
+          resumeRow.from = from
+          resumeRow.isDelivered = result.isDelivered
+          if (title !== '') resumeRow.title = title
+        } else M.addMessage(data, { from, to, kind: 'message', text: e.text, at: now, isDelivered: result.isDelivered, ...(title !== '' ? { title } : {}) })
+        touched($, now)
+      }
+    } catch {
+      // the message goes whatever the deck makes of it
+    }
+    return result
+  })
+
+  on('session.receive', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      const origin = e.origin
+      const now = await $.clock.now()
+      if (origin.kind === 'task-notification' && M.endWorkflows(data, e.text, now)) touched($, now)
+      if (origin.kind === 'peer' || origin.kind === 'coordinator' || origin.kind === 'peer-send-message') {
+        const to = e.agentId ?? M.MAIN
+        // the receiver reads a send inside an envelope (<agent-message from="…">): matched without it, logged once
+        const echo = M.echoOf(data, to, e.text, now)
+        if (echo) {
+          echo.isDelivered = true
+          if (echo.to !== to && M.agentOf(data, to)) echo.to = to
+        } else if (isRelayEcho(to, e.text)) {
+          // your words the Orchestrator passed on: logged already, as yours
+        } else if (!('plugin' in origin && origin.plugin === $.plugin.name)) {
+          const unwrapped = M.unwrapMessage(e.text)
+          const named = 'teammate' in origin ? origin.teammate : unwrapped.from
+          // a sender that is no agent of the session keeps the name it gave; with no name, the sender is the delivery's kind (a coordinator's is the main loop)
+          const from = named ? (M.resolveRecipient(data, named)?.id ?? F.trunc(F.oneLine(named), 120)) : origin.kind === 'coordinator' ? M.MAIN : origin.kind
+          if (unwrapped.text.trim() !== '') M.addMessage(data, { from, to, kind: 'message', text: unwrapped.text, at: now })
+        }
+        touched($, now)
+      }
+    } catch {
+      // the delivery stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  // A call the engine puts to the mode's decider: a permission prompt, if its dialog shows (classic.PermissionRequest). Observe only.
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e)
+    // Inspect's permissions log: every verdict on a real call, as the engine gave it
+    if (await inspectCheck($, data, e, verdict, next.origin.plugin === $.plugin.name, currentGit().root || null)) touched($, await $.clock.now())
+    try {
+      // the deck's own calls, a query (no call), and the tools whose dialog is the person's own answer (a question, a plan) are no permission prompt
+      const isPrompt = verdict.decision === 'ask' && e.tool_use_id !== undefined && e.tool_use_id !== '' && !PERSON_TOOLS.includes(e.tool) && next.origin.plugin !== $.plugin.name
+      if (isPrompt && e.tool_use_id) {
+        asks.set(e.tool_use_id, { tool: e.tool, input: e.input, agentId: e.agentId ?? M.MAIN })
+        keepAtMost(asks, MOST_KEPT)
+      }
+    } catch {
+      // the verdict stands whatever the deck makes of it
+    }
+    return verdict
+  })
+
+  // The permission dialog shows for a call the engine asked about: it is held on you until the call ends or is denied. Observe only.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const result = await next(e)
+    // Inspect: the dialog showed, or a PermissionRequest hook answered in its place
+    if (inspectDialog(data, askFor(e.tool_name, e.tool_input, e.agent_id ?? M.MAIN), result, e)) touched($, await $.clock.now())
+    try {
+      // a settings hook that decided spares you the dialog
+      if (result.decision === undefined && result.block === undefined) {
+        const agentId = e.agent_id ?? M.MAIN
+        const id = askFor(e.tool_name, e.tool_input, agentId)
+        const asked = id !== undefined ? asks.get(id) : undefined
+        if (id !== undefined && asked && openCalls.has(id)) {
+          const now = await $.clock.now()
+          M.notePending(data, M.permissionOf({ id, tool: asked.tool, input: asked.input, agentId, at: now }, currentGit().root || null))
+          touched($, now)
+        }
+      }
+    } catch {
+      // the dialog shows whatever the deck makes of it
+    }
+    return result
+  })
+
+  // The permission was refused (the auto-mode classifier): nothing waits on you for it.
+  on('classic.PermissionDenied', async ($, e, next) => {
+    const result = await next(e)
+    if (inspectDenied(data, e)) touched($, await $.clock.now())
+    try {
+      asks.delete(e.tool_use_id)
+      if (M.dropPending(data, e.tool_use_id)) touched($, await $.clock.now())
+    } catch {
+      // the refusal stands whatever the deck makes of it
+    }
+    return result
+  })
+
+  // Claude Code's notification: a row in the chat, as it sent it, and waiting on you when it asks (a permission prompt, an MCP server's question, Claude idle for your input). Observe only.
+  on('classic.Notification', async ($, e, next) => {
+    try {
+      const now = await $.clock.now()
+      const note = { type: e.notification_type, message: e.message, at: now, ...(e.title ? { title: e.title } : {}), ...(e.agent_id ? { agent: e.agent_id } : {}) }
+      if (M.noteNotification(data, note)) touched($, now)
+    } catch {
+      // the notification goes out whatever the deck makes of it
+    }
+    return next(e)
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    isPaneOpen = true
+    const now = await $.clock.now()
+    shownKey = screenKey(now)
+    keepChat($, now)
+    noteScreen(e.surface, e.viewport)
+    // the terminal: the drawing no taller than the pane's room and the terminal allow (`paneRowsFor`), Chat's newest messages and the Dashboard's sections cut to fit
+    const rows = e.surface === 'terminal' ? paneRowsFor(e.props.scroll.bodyRows, e.viewport?.rows) : undefined
+    // the terminal: whether the pane holds the keyboard, since its keys type into the prompt while it does not (the desktop's drawing keeps out of it: ./renderMemo)
+    const isKeyless = e.surface === 'terminal' && e.props.isFocused === false
+    return drawn.of(`pane:${e.surface}`, [e.props.bodyColumns, rows ?? 0, shownKey, view, isKeyless], () => {
+      const kit = { ...kitOf($.ui.resolve(e), e.surface, Math.max(24, e.props.bodyColumns - 1), rows), ...(isKeyless ? { isKeyless } : {}) }
+      return deckView(kit, modelOf(now), actionsFor($), dashOf(now, e.surface, $))
+    })
+  })
+
+  // what Org's chart Client posts: a card clicked opens that agent's page
+  on('ui.message', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    await openFromChart($, e.data)
+    return next(e)
+  })
+
+  // Org's chart Client failed: that surface's Org lists the agents as a tree until Org is left (or /eagle-eye opens)
+  on('ui.fault', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    orgDown.add(e.surface)
+    redraw($)
+    return next(e)
+  })
+
+  // the pane's focus ring, wherever it moved (your Tab, arrows or click; the deck's j, k and n): where they move it from next
+  on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny === undefined) paneFocus = e.element ?? ''
+    return result
+  })
+
+  // your own scrolling of the pane: whether it leaves you at the end, where Chat keeps to its newest message; read from the move as you made it, before the engine answers, so nothing the deck does meanwhile takes you back down
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') chatFollow.isAtEnd = isAtEndAfter(e)
+    return next(e)
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    noteScreen(e.surface, e.viewport)
+    if (e.props.hasSurvey) return next(e)
+    const now = await $.clock.now()
+    // one line, this session's: only while an agent is at work or something needs you (`W.bandOf`), and the person has not hidden it; Claude Code's own loops raise none
+    const band = view.isBandHidden ? null : W.bandOf(v2Of(now))
+    // what the Browser pane's page sent in your voice shows whatever else does: hidden band, no agent at work
+    if (!band && heldQueue().items.length === 0) return next(e)
+    const theirs: RenderElement = await next(e)
+    // the band speaks for the screen only while the pane, which shows more, is shut
+    const key = screenKey(now)
+    if (!isPaneOpen) shownKey = key
+    return drawn.of(`band:${e.surface}`, [e.props.bodyColumns, key, view, theirs, heldQueue().version], () => {
+      const kit = kitOf($.ui.resolve(e), e.surface, Math.max(24, e.props.bodyColumns))
+      return bandOf(kit, { ...modelOf(now), band }, actionsFor($), theirs) ?? theirs
+    })
+  })
+
+  // Inspect's own events (./inspectHooks), each observing only: a compaction, the context measured, the instruction files, the mode, the settings
+
+  on('session.compact', async ($, e, next) => {
+    const result = await next(e)
+    if (await inspectCompaction($, data, e, result)) {
+      touched($, await $.clock.now())
+      void readContextSoon($)
+    }
+    return result
+  })
+
+  // the engine measured the session (after each main-thread turn): the breakdown read again, at most every 10 s; the spend and the context read again when they moved, the deck shut or not, so the header, state.json and this deck's registry file follow
+  on('session.measure', async ($, e, next) => {
+    const result = await next(e)
+    void readContextSoon($)
+    if (e.changed.includes('cost') || e.changed.includes('context')) void loadUsage($)
+    return result
+  })
+
+  // how the main loop's session began (Claude Code's SessionStart): a fork's spend counts the session it was forked from
+  on('classic.SessionStart', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agent_id !== undefined) return result
+    startedAs = e.source
+    const wasFork = data.isFork === true
+    noteStart(e.source)
+    // before session.start the deck has nothing to show yet: session.start applies it
+    if (sessionId !== '' && (data.isFork === true) !== wasFork) touched($, await $.clock.now())
+    return result
+  })
+
+  on('prompt.context', async ($, e, next) => {
+    const result = await next(e)
+    if (await inspectInstructions($, data, result.instructionFiles ?? e.instructionFiles)) touched($, await $.clock.now())
+    return result
+  })
+
+  on('classic.InstructionsLoaded', async ($, e, next) => {
+    const result = await next(e)
+    if (await inspectInstructionLoaded($, data, e)) touched($, await $.clock.now())
+    return result
+  })
+
+  // the main loop's permission mode and effort, as each of these names them
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const result = await next(e)
+    if (inspectMode(data, e)) touched($, await $.clock.now())
+    return result
+  })
+
+  // each also says Claude Code ran the call (it was not refused before it ran): Inspect's decisions and Recent activity's "⊘ denied" read it
+  on('classic.PostToolUse', async ($, e, next) => {
+    inspectRan(e.tool_use_id)
+    const result = await next(e)
+    if (inspectMode(data, e)) touched($, await $.clock.now())
+    return result
+  })
+
+  on('classic.PostToolUseFailure', async ($, e, next) => {
+    inspectRan(e.tool_use_id)
+    const result = await next(e)
+    if (inspectMode(data, e)) touched($, await $.clock.now())
+    return result
+  })
+
+  // a settings file changed: its hooks and the output style read again
+  on('classic.ConfigChange', async ($, e, next) => {
+    const result = await next(e)
+    void readInspected($)
+    return result
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PROBE }, async ($, e) => {
+    const ui = $.ui.resolve(e)
+    // a table answers to every element name (a missing one draws a fragment): the surface says which really draw
+    const Client = (e.surface === 'terminal' || e.surface === 'desktop') && 'Client' in ui ? ui.Client : undefined
+    const Svg = e.surface !== 'terminal' && 'Svg' in ui ? ui.Svg : undefined
+    return probeView(ui, e, Client, Svg)
+  })
+
+  // what the probe's Client posts (a click's cell); only this plugin's hooks hear it
+  on('ui.message', { component: 'Pane', requestId: PROBE }, async ($, e, next) => {
+    probe.message = jsonLine(e.data)
+    redraw($)
+    return next(e)
+  })
+
+  // the probe's Client failed: say when and why, and leave it out of that surface's drawing
+  on('ui.fault', { component: 'Pane', requestId: PROBE }, async ($, e, next) => {
+    probe.fault = { surface: e.surface, phase: e.phase, reason: F.oneLine(e.reason) }
+    probe.failedOn.add(e.surface)
+    redraw($)
+    return next(e)
+  })
+}

@@ -1,0 +1,8 @@
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -1,2 +1,4 @@
+ ## Limits
+-None yet.
++Each user may make 100 requests a minute; a route may set its own limit.
++Past it the API answers `429 Too Many Requests` with `Retry-After`, in seconds.
++

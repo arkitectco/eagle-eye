@@ -1,0 +1,81 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+env:
+  # The Claude Code release these checks were last run with. Raise it on purpose.
+  CLAUDE_CODE_VERSION: 2.1.322
+  # No auto-update, telemetry or error reports from the runner.
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@${{ env.CLAUDE_CODE_VERSION }}
+
+      - name: Versions
+        run: |
+          node --version
+          claude --version
+
+      # The marketplace at the top lists the plugin, which lives in plugin/:
+      # all an install copies. The directory's checks take the plugin's folder
+      # (they read the README at the repository's top).
+      - name: Validate the marketplace
+        run: claude plugin validate --strict .
+
+      - name: Validate the plugin
+        run: claude plugin validate --strict --profile directory plugin
+
+      # One test file at a time, by the script contributors run too: the kit
+      # gives a test 5 s of wall time, and with every file at once on the
+      # runner's few cores a busy test outruns it. Claude Code resolves a file
+      # call's path the way the host does, so a test of a path only Windows
+      # spells (a drive letter, an 8.3 short name) runs on Windows alone, and
+      # its twin with POSIX paths on Linux and macOS.
+      - name: Mod tests
+        shell: bash
+        run: bash scripts/test.sh
+
+      # tsc against the types this Claude Code writes when it loads the mod,
+      # from a short signed-out session in a pseudo-terminal (`script`, which
+      # the Windows runner lacks).
+      - name: Type-check
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/typecheck.sh --fresh
+
+      - name: Web server and page tests
+        run: node --test tests/web/
+
+      # Real git against hostile repositories: no command the deck runs may run what a repository's own settings name.
+      - name: Git against hostile repositories
+        if: runner.os != 'Windows'
+        run: node --test tests/gitpoc.test.mjs
+
+      - name: Sample data matches its builder
+        run: node plugin/web/fixtures/make-v2.mjs --check

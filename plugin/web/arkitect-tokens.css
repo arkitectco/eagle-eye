@@ -1,0 +1,221 @@
+/* Arkitect tokens: dark is the default theme, light via data-theme="light" */
+:root, [data-theme="dark"] {
+  --background: oklch(0.08 0 0); /* Page canvas. Near-black in dark, warm paper in light. */
+  --dark-bg: #0a0a0a; /* Footer and full-bleed band ground, one step off the canvas. */
+  --card: oklch(0.12 0 0); /* Stat cards, article tiles, raised panels. */
+  --popover: oklch(0.10 0 0); /* Menus, the floating nav bar, sheets. */
+  --secondary: oklch(0.18 0 0); /* Small filled controls, card gradient start. */
+  --muted: oklch(0.25 0 0); /* Inline code and quiet fills. */
+  --input: oklch(0.23 0 0); /* Form field fill. */
+  --sidebar: oklch(0.10 0 0); /* Side rails and drawers. */
+  --sidebar-accent: oklch(0.15 0 0); /* Hovered or active row inside a sidebar. */
+  --foreground: oklch(0.929 0.019 86.6); /* Headings, primary text, nav labels. A warm off-white in dark, never pure white. */
+  --card-foreground: var(--foreground); /* Text on card. */
+  --popover-foreground: oklch(0.95 0 0); /* Text on popover. */
+  --primary: var(--foreground); /* Inverted fills (rare). Pairs with primary-foreground. */
+  --primary-foreground: oklch(0.08 0 0); /* Text on primary. */
+  --secondary-foreground: oklch(0.85 0 0); /* Text on secondary. */
+  --muted-foreground: oklch(0.68 0 0); /* Taglines, stat captions, dates, inactive nav, eyebrows and section labels. Passes 4.5:1 on background and card. */
+  --sidebar-foreground: oklch(0.95 0 0); /* Text on sidebar. */
+  --prose-heading: oklch(0.95 0 0); /* Headings inside long-form article bodies. */
+  --prose-body: oklch(0.85 0 0); /* Article paragraph text. */
+  --motif-dim: oklch(0.58 0 0); /* Placeholder text, corner ticks and other decorative marks. Never for content; in light it sits near 3:1 on background (kept from the source). */
+  --accent: oklch(0.70 0.20 45); /* Terracotta. Active nav underline, stat numerals, link cursors, hero glow, focus ring, hover borders. The only chromatic hue. */
+  --accent-foreground: oklch(0.08 0 0); /* Text on an accent fill. */
+  --accent-soft: oklch(0.55 0.14 42); /* Underline rules under stats, softer accent marks. */
+  --accent-deep: oklch(0.42 0.11 42); /* Deep accent for glow cores and pressed states. */
+  --motif-code-value: oklch(0.75 0.18 45); /* Lighter accent for links inside prose and accent hovers. Reads on background and card in both themes. */
+  --prose-link: var(--motif-code-value); /* Links inside article bodies. */
+  --ring: var(--accent); /* Focus ring. */
+  --selection-bg: var(--accent); /* Text selection fill. */
+  --selection-fg: oklch(0.08 0 0); /* Text selection ink. */
+  --destructive: oklch(0.577 0.245 27.325); /* Errors only. Never decorative. */
+  --border: oklch(0.28 0 0); /* 1px hairlines on cards, buttons, inputs. The main structural device. */
+  --grid-line: oklch(0.23 0 0); /* Section rules and the ruled page grid with corner ticks. */
+  --prose-hr: oklch(0.30 0 0); /* Horizontal rules in articles; also the hover hairline. */
+  --sidebar-border: var(--border); /* Sidebar hairline. */
+  --scrollbar-track: #141414; /* Scrollbar track. */
+  --scrollbar-thumb: #3d3d3d; /* Scrollbar thumb. */
+  --scrollbar-thumb-hover: #525252; /* Scrollbar thumb on hover. */
+  --theme-color: #141414; /* Browser theme-color meta. */
+  --surface: var(--card); /* Alias of card, kept for older component markup. */
+  --surface-2: var(--secondary); /* Alias of secondary, kept for older component markup. */
+  --border-2: var(--prose-hr); /* Hover hairline. Alias of prose-hr. */
+  --accent-2: var(--motif-code-value); /* Lighter accent for hover. Alias of motif-code-value. */
+  --fg-1: var(--foreground); /* Alias: primary text. */
+  --fg-2: var(--prose-body); /* Alias: body text. */
+  --fg-3: var(--muted-foreground); /* Alias: secondary text. */
+  --fg-4: var(--motif-dim); /* Alias: faint decorative text. */
+  --elevation-sm: 0 1px 2px oklch(0 0 0 / 0.55); /* Subtle lift on small controls. */
+  --elevation-md: 0 4px 16px -4px oklch(0 0 0 / 0.55); /* Floating nav bar, menus. */
+  --elevation-lg: 0 12px 40px -12px oklch(0 0 0 / 0.55); /* Popovers and sheets. */
+  --elevation-xl: 0 24px 48px -16px oklch(0 0 0 / 0.55); /* Modals. */
+  --glow-accent: 0 0 56px -8px oklch(0.70 0.20 45 / 0.22); /* Accent halo for the hero heading or one highlighted button. One per screen. */
+}
+[data-theme="light"] {
+  --background: oklch(0.97 0.005 90);
+  --dark-bg: #f4f3ef;
+  --card: oklch(1 0 0);
+  --popover: oklch(1 0 0);
+  --secondary: oklch(0.94 0.008 90);
+  --muted: oklch(0.92 0.008 90);
+  --input: oklch(0.90 0.01 90);
+  --sidebar: oklch(0.96 0.005 90);
+  --sidebar-accent: oklch(0.94 0.008 90);
+  --foreground: oklch(0.18 0.01 60);
+  --card-foreground: var(--foreground);
+  --popover-foreground: oklch(0.18 0.01 60);
+  --primary: oklch(0.22 0.01 60);
+  --primary-foreground: oklch(0.98 0.005 90);
+  --secondary-foreground: oklch(0.28 0.01 60);
+  --muted-foreground: oklch(0.35 0.01 60);
+  --sidebar-foreground: oklch(0.18 0.01 60);
+  --prose-heading: oklch(0.16 0.01 60);
+  --prose-body: oklch(0.32 0.01 60);
+  --motif-dim: oklch(0.62 0.01 60);
+  --accent: oklch(0.62 0.18 45);
+  --accent-foreground: oklch(0.99 0.005 90);
+  --accent-soft: oklch(0.72 0.14 45);
+  --accent-deep: oklch(0.50 0.16 42);
+  --motif-code-value: oklch(0.55 0.16 45);
+  --prose-link: var(--motif-code-value);
+  --ring: var(--accent);
+  --selection-bg: var(--accent);
+  --selection-fg: oklch(0.99 0.005 90);
+  --destructive: oklch(0.55 0.22 25);
+  --border: oklch(0.86 0.01 90);
+  --grid-line: oklch(0.90 0.008 90);
+  --prose-hr: oklch(0.86 0.01 90);
+  --sidebar-border: var(--border);
+  --scrollbar-track: #f1f0ee;
+  --scrollbar-thumb: #bcb9b3;
+  --scrollbar-thumb-hover: #9a968d;
+  --theme-color: #f4f3ef;
+  --surface: var(--card);
+  --surface-2: var(--secondary);
+  --border-2: var(--prose-hr);
+  --accent-2: var(--motif-code-value);
+  --fg-1: var(--foreground);
+  --fg-2: var(--prose-body);
+  --fg-3: var(--muted-foreground);
+  --fg-4: var(--motif-dim);
+  --elevation-sm: 0 1px 2px oklch(0.35 0.02 60 / 0.14);
+  --elevation-md: 0 4px 18px -4px oklch(0.35 0.02 60 / 0.14);
+  --elevation-lg: 0 16px 40px -12px oklch(0.35 0.02 60 / 0.14);
+  --elevation-xl: 0 28px 56px -18px oklch(0.35 0.02 60 / 0.14);
+  --glow-accent: 0 0 56px -8px oklch(0.62 0.18 45 / 0.18);
+}
+:root {
+  --space-1: 0.25rem; /* Icon gaps. */
+  --space-2: 0.5rem; /* Tight inline gaps. */
+  --space-3: 0.75rem; /* Small control padding (8px 12px). */
+  --space-4: 1rem; /* Default gap. */
+  --space-6: 1.5rem; /* Button horizontal padding, nav bar inset. */
+  --space-8: 2rem; /* Card padding. */
+  --space-12: 3rem; /* Gap between stacked blocks. */
+  --space-16: 4rem; /* Section inner spacing. */
+  --space-24: 6rem; /* Section vertical rhythm. */
+  --space-32: 8rem; /* Hero top/bottom. */
+  --radius: 0px; /* Everything: cards, buttons, inputs, tiles. The system is square. */
+  --radius-pill: 9999px; /* Only the floating top nav bar. */
+  --noise-opacity: 0.03; /* Film-grain overlay strength (0.04 in light). */
+  --font-display: 'Bebas Neue', ui-sans-serif, sans-serif;
+  --font-sans: 'Hanken Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Fragment Mono', ui-monospace, monospace;
+  --text-hero-name: 400 96px/0.88 var(--font-display); /* Hero heading, uppercase. Responsive: clamp(3rem, 12vw, 6rem) with the hatched offset shadow. */
+  --text-section-title: 400 30px/36px var(--font-display); /* Section heads, uppercase. */
+  --text-card-title: 400 20px/27.5px var(--font-display); /* Article and project tile titles; turn accent on hover. */
+  --text-lead: 400 18px/29.25px var(--font-sans); /* Hero tagline and intro paragraphs, muted-foreground. */
+  --text-body: 400 16px/26px var(--font-sans); /* Default paragraph. */
+  --text-caption: 400 15px/24.375px var(--font-sans); /* Stat captions, card descriptions. */
+  --text-nav: 400 14px/20px var(--font-sans); /* Nav items. The active item is foreground with a 1px accent underline. */
+  --text-stat: 400 36px/40px var(--font-mono); /* Stat numerals in accent. */
+  --text-button: 400 14px/20px var(--font-mono); /* Buttons, uppercase. */
+  --text-eyebrow: 400 12px/16px var(--font-mono); /* Uppercase section eyebrows. */
+  --text-meta: 400 12px/16px var(--font-mono); /* Dates and small metadata. */
+  --text-cursor-link: 400 13px/22.75px var(--font-sans); /* Lowercase link with a trailing accent _ cursor. */
+}
+.hero-name {
+  font-family: var(--font-display);
+  font-size: 96px;
+  line-height: 0.88;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}
+.section-title {
+  font-family: var(--font-display);
+  font-size: 30px;
+  line-height: 36px;
+  font-weight: 400;
+  letter-spacing: 0.025em;
+}
+.card-title {
+  font-family: var(--font-display);
+  font-size: 20px;
+  line-height: 27.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.lead {
+  font-family: var(--font-sans);
+  font-size: 18px;
+  line-height: 29.25px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.body {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 26px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.caption {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 24.375px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.nav {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}
+.stat {
+  font-family: var(--font-mono);
+  font-size: 36px;
+  line-height: 40px;
+  font-weight: 400;
+  letter-spacing: -0.025em;
+}
+.button {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+}
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+}
+.meta {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
+  letter-spacing: 0.025em;
+}
+.cursor-link {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 22.75px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}

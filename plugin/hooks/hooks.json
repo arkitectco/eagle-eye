@@ -1,0 +1,4 @@
+{
+  "description": "Eagle Eye: the /eagle-eye deck (Dashboard, Chat, Org, Changes, Inspect, Settings) in the side pane, the terminal, or the browser, plus the agents band above the prompt",
+  "modules": ["./register.tsx"]
+}

@@ -1,0 +1,712 @@
+/**
+ * Eagle Eye's shared avatar library: ten styles on a 40 by 40 SVG grid.
+ * Blocks (the default) are nine extruded, straight-edged characters in
+ * Arkitect warm white, terracotta and ink. The Orchestrator is keystone;
+ * other agents keep the character selected by their id (else their name).
+ * The other styles are mood, critter, pixel, mono, orbit, bauhaus, ring,
+ * glyph and blob. Blocks and mood faces express the agent's status.
+ *
+ * With `animated`, a block bobs and scans its eyes while running, hops and
+ * looks up while waiting, settles once when done, shakes once when failed,
+ * and breathes slowly when idle. The other styles pulse their status dot
+ * while running; a progress ring without known progress spins. Every
+ * animation respects prefers-reduced-motion.
+ *
+ * `avatarSvg(style, agent, opts)` returns a self-contained SVG document.
+ * The browser (web/parts.mjs) and Desktop pane (hooks/ui/v2/look.tsx) draw
+ * the same document. The terminal uses `terminalFace` for its character
+ * and status mark. A plain ES module, without DOM or Node dependencies:
+ * the same inputs produce the same document, preserving ongoing motion.
+ */
+
+/** The styles, in the order a picker lists them, each with the name the picker shows. */
+export const STYLES = [
+  { id: 'block', name: 'Blocks' },
+  { id: 'mood', name: 'Mood faces' },
+  { id: 'critter', name: 'Critters' },
+  { id: 'pixel', name: 'Pixel sprites' },
+  { id: 'mono', name: 'Monogram tiles' },
+  { id: 'orbit', name: 'Orbits' },
+  { id: 'bauhaus', name: 'Bauhaus' },
+  { id: 'ring', name: 'Progress rings' },
+  { id: 'glyph', name: 'Terminal glyphs' },
+  { id: 'blob', name: 'Blob faces' },
+]
+
+/** The style ids alone, in the pickers' order. */
+export const STYLE_IDS = STYLES.map(one => one.id)
+
+/** The style the deck draws until someone picks another. */
+export const DEFAULT_STYLE = 'block'
+
+/**
+ * Arkitect's terracotta ramp and warm foreground, flattened to sRGB for
+ * SVG images and native terminal Text (which cannot inherit page tokens).
+ * Source: web/arkitect-tokens.css --accent-deep (0.42 0.11 42) through
+ * --accent-soft (0.55 0.14 42), in ten equal OKLCH steps; --foreground
+ * (0.929 0.019 86.6) supplies the light colour. Ten slots keep seeded
+ * palette indices consistent across the web, Desktop pane and terminal.
+ */
+export const PALETTE = [
+  ['#7d3414', '#ede7da'],
+  ['#823716', '#ede7da'],
+  ['#883a18', '#ede7da'],
+  ['#8e3d1a', '#ede7da'],
+  ['#94401c', '#ede7da'],
+  ['#9a431d', '#ede7da'],
+  ['#a0461f', '#ede7da'],
+  ['#a64a21', '#ede7da'],
+  ['#ac4d23', '#ede7da'],
+  ['#b35025', '#ede7da'],
+]
+
+/** Arkitect's secondary text, accent, foreground, destructive and muted tokens, flattened to sRGB. */
+export const LOOK_HUE = { running: '#cecece', waiting: '#fe6a00', done: '#ede7da', failed: '#e7000b', idle: '#989898' }
+
+/** What the terminal draws for each look, after the agent's glyph: the deck's own status marks. */
+export const LOOK_MARK = { running: '◐', waiting: '‖', done: '✓', failed: '✕', idle: '◌' }
+
+/** The terminal's glyphs: one an agent, by its seed. */
+export const GLYPHS = ['◆', '●', '▲', '■', '✦', '⬢', '★', '◉']
+
+/** Block characters on the terminal, in the same order as BLOCKS. */
+export const BLOCK_GLYPHS = ['▟', '┳', '▥', '▦', '╥', '▲', '▚', '◣', '▤']
+
+/** Bauhaus on the terminal: a half-filled shape, one an agent, by its seed. */
+export const BAUHAUS_GLYPHS = ['◧', '◩', '◭', '◓', '◨', '◪', '◮', '◒']
+
+/** The ground a status dot is ringed in, as the gallery drew it: the deck's card. */
+const GROUND = '#141414'
+/** A face's dark ink. */
+const INK = '#1a1a1a'
+
+/** Each status the deck names, as a look: starting reads as running, and a stopped agent as idle. */
+const LOOKS = { starting: 'running', running: 'running', waiting: 'waiting', done: 'done', failed: 'failed', idle: 'idle', stopped: 'idle' }
+
+/** A status as the look it draws: running, waiting, done, failed or idle (idle for one the deck does not name). */
+export function lookOf(status) {
+  return Object.prototype.hasOwnProperty.call(LOOKS, status) ? LOOKS[status] : 'idle'
+}
+
+/** Whether `value` names one of the styles. */
+export function isStyle(value) {
+  return typeof value === 'string' && STYLE_IDS.includes(value)
+}
+
+/** `value` when it names a style, else the default. */
+export function styleOf(value) {
+  return isStyle(value) ? value : DEFAULT_STYLE
+}
+
+/** A style's name as a picker shows it ("Blocks"); the default's for a style it does not know. */
+export function styleName(style) {
+  return (STYLES.find(one => one.id === style) ?? STYLES[0]).name
+}
+
+/** FNV-1a over the text's UTF-16 units, as the mod's own hash (hooks/format.ts): the same id, the same number, everywhere. */
+export function hash(text) {
+  const s = String(text)
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+/**
+ * A text's hash with its bits stirred (murmur3's finaliser), so every
+ * character moves every pick. FNV-1a's own low decimal digit repeats across
+ * ids alike: five of the sample's eight agents would share one colour.
+ */
+export function pickOf(text) {
+  let h = hash(text)
+  h ^= h >>> 16
+  h = Math.imul(h, 0x85ebca6b)
+  h ^= h >>> 13
+  h = Math.imul(h, 0xc2b2ae35)
+  h ^= h >>> 16
+  return h >>> 0
+}
+
+/** What an agent's look is seeded by: its id, which never changes, else its name. */
+function seedOf(agent) {
+  const id = agent && typeof agent.id === 'string' ? agent.id : ''
+  const name = agent && typeof agent.name === 'string' ? agent.name : ''
+  return id || name || '?'
+}
+
+/** An agent's palette index, 0 to 9, by its seed: the state's `avatar`. */
+export function paletteIndexOf(agent) {
+  return pickOf(seedOf(agent)) % PALETTE.length
+}
+
+/** An agent's two colours, deep then light: the palette's at its index. */
+export function colorsOf(agent) {
+  return PALETTE[paletteIndexOf(agent)]
+}
+
+/** How far through its own TodoWrite list an agent is, 0 to 1; undefined with no list. */
+export function progressOf(todos) {
+  const list = Array.isArray(todos) ? todos : []
+  if (list.length === 0) return undefined
+  return list.filter(one => one && one.status === 'done').length / list.length
+}
+
+/** Text with each lone surrogate (half a pair, which no URL or document can encode) as U+FFFD. */
+function wellFormed(text) {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i)
+    const next = text.charCodeAt(i + 1)
+    if (unit >= 0xd800 && unit <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      out += text[i] + text[i + 1]
+      i++
+    } else out += unit >= 0xd800 && unit <= 0xdfff ? String.fromCharCode(0xfffd) : text[i]
+  }
+  return out
+}
+
+/** Text for an SVG document: markup characters escaped, a lone surrogate replaced. */
+function esc(text) {
+  return wellFormed(String(text)).replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`)
+}
+
+/** A number for markup: two decimals at most. */
+const n2 = value => String(Math.round(value * 100) / 100)
+
+/** An id fit for markup and CSS: letters, digits, `_` and `-`, led by a letter. */
+function idOf(value) {
+  const clean = String(value).replace(/[^A-Za-z0-9_-]/g, '')
+  return /^[A-Za-z]/.test(clean) ? clean : `av${clean}`
+}
+
+// ------------------------------------------------------------------ styles
+//
+// Each draws one face on the 40 grid from `c`: { c1, c2, seed, h (the seed's
+// hash), look, name, role, progress, u (the document's own id prefix), animated },
+// as { defs, body, isDotted, css, isSpun }: its gradients and clips, its shapes,
+// whether the status dot goes on it, its own motion's rules (when animated), and
+// whether a ring spins.
+
+/** Whole-body and eye motion for each block status, scoped to its SVG document. */
+function blockMotion(u, look) {
+  const at = name => `${u}-${name}`
+  if (look === 'running') {
+    return [
+      `.${at('bob')}{animation:${at('bob')} 1.4s ease-in-out infinite}`,
+      `.${at('eyes')}{animation:${at('scan')} 2.8s ease-in-out infinite}`,
+      `@keyframes ${at('bob')}{0%,100%{transform:translateY(0)}50%{transform:translateY(-1.2px)}}`,
+      `@keyframes ${at('scan')}{0%,100%{transform:translateX(0)}25%{transform:translateX(-2.6px)}75%{transform:translateX(2.6px)}}`,
+    ].join('')
+  }
+  if (look === 'waiting') {
+    return [
+      `.${at('bob')}{animation:${at('hop')} 3.2s ease-in-out infinite}`,
+      `.${at('eyes')}{animation:${at('look')} 3.2s ease-in-out infinite}`,
+      `@keyframes ${at('hop')}{0%,70%,100%{transform:translateY(0)}77%{transform:translateY(-2.2px)}84%{transform:translateY(0)}90%{transform:translateY(-1px)}96%{transform:translateY(0)}}`,
+      `@keyframes ${at('look')}{0%,68%,100%{transform:translateY(0)}76%,90%{transform:translateY(-1px)}}`,
+    ].join('')
+  }
+  if (look === 'done') {
+    return `.${at('bob')}{animation:${at('settle')} .9s ease-out 1 both}@keyframes ${at('settle')}{0%{transform:translateY(-2.4px)}55%{transform:translateY(.6px)}100%{transform:translateY(0)}}`
+  }
+  if (look === 'failed') {
+    return `.${at('bob')}{animation:${at('shake')} .6s ease-in-out 1}@keyframes ${at('shake')}{0%,100%{transform:translateX(0)}20%{transform:translateX(-1.6px)}40%{transform:translateX(1.6px)}60%{transform:translateX(-1px)}80%{transform:translateX(.8px)}}`
+  }
+  return `.${at('bob')}{animation:${at('breathe')} 4.8s ease-in-out infinite}@keyframes ${at('breathe')}{0%,100%{opacity:.8;transform:translateY(0)}50%{opacity:.6;transform:translateY(.7px)}}`
+}
+
+const BLOCK_BODY = '#EDE7DA'
+const BLOCK_ACCENT = '#FE6A00'
+const BLOCK_INK = '#141414'
+const BLOCK_GREY = '#8A8A8A'
+
+const rect = (x, y, w, h) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+
+/**
+ * The nine characters on a 32-unit design grid. `d` is the depth every piece is
+ * extruded by (up and to the right at 45 degrees). A piece is [id, points, fill]
+ * or [id, points, fill, depth]; fill 'b' is the body colour, 'a' the accent.
+ * Pieces are listed back to front. `eyes` are [x, y, size]. `lines` are extra
+ * ink strokes [x1, y1, x2, y2]; `flats` are flat rects [x, y, w, h, fill].
+ */
+const BLOCKS = [
+  { id: 'keystone', d: 2, pieces: [
+      ['body', [[11,8],[21,8],[21,14],[23,14],[23,17],[25,17],[25,21],[23,21],[23,25],[20,25],[20,23],[12,23],[12,25],[9,25],[9,21],[7,21],[7,17],[9,17],[9,14],[11,14]], 'b'],
+      ['cap', rect(14,5,4,3), 'a']],
+    eyes: [[13,10.5,2],[17,10.5,2]] },
+  { id: 't-square', d: 2, pieces: [
+      ['foot-left', rect(12,23,3,3), 'b'], ['foot-right', rect(17,23,3,3), 'b'],
+      ['hip-left', rect(11,17,2,6), 'b'], ['body', rect(13,9,6,14), 'b'], ['hip-right', rect(19,17,2,6), 'b'],
+      ['bar', rect(6,7,20,2), 'b'], ['cap', rect(14,4,4,3), 'a']],
+    eyes: [[14,11,1.5],[16.5,11,1.5]] },
+  { id: 'column', d: 2, pieces: [
+      ['foot-left', rect(9,23,4,3), 'b'], ['foot-right', rect(15,23,4,3), 'b'],
+      ['arm-left', rect(7,15,2,4), 'b'], ['shaft', rect(9,9,10,14), 'b'], ['arm-right', rect(19,15,2,4), 'b'],
+      ['abacus', rect(7,7,14,2), 'b'], ['slab', rect(9,5,10,2), 'b']],
+    lines: [[11,13.5,11,23],[13,13.5,13,23],[15,13.5,15,23],[17,13.5,17,23]],
+    eyes: [[10.5,10,2],[15.5,10,2]] },
+  { id: 'brick', d: 2, pieces: [
+      ['foot-left', rect(7,24,4,3), 'b'], ['foot-mid', rect(14,24,4,3), 'b'], ['foot-right', rect(21,24,4,3), 'b'],
+      ['row-bottom-left', rect(8,19,8,5), 'b'], ['row-bottom-right', rect(16,19,8,5), 'b'],
+      ['row-mid', rect(10,15,10,4), 'b'], ['brick-accent', rect(20,15,4,4), 'a'],
+      ['row-face-left', rect(8,10,7,5), 'b'], ['row-face-right', rect(15,10,7,5), 'b'],
+      ['top', rect(11,6,8,4), 'b']],
+    eyes: [[11.5,11.5,2],[16.5,11.5,2]] },
+  { id: 'scaffold', d: 2, pieces: [
+      ['leg-left', rect(7,20,2,6), 'b'], ['leg-right', rect(23,20,2,6), 'b'],
+      ['deck', rect(6,18,20,2), 'b'],
+      ['post-left', rect(9,9,2,9), 'b'], ['post-right', rect(21,9,2,9), 'b'],
+      ['beam', rect(8,7,16,2), 'b'], ['cap', rect(14,4,4,3), 'a'],
+      ['head', rect(12,15,8,5), 'b']],
+    eyes: [[13.5,16.5,2],[16.5,16.5,2]] },
+  { id: 'compass', d: 1.5, pieces: [
+      ['foot-left', rect(5,25,5,2), 'b'], ['foot-right', rect(22,25,5,2), 'b'],
+      ['leg-left', [[14,9],[16,9],[9,25],[7,25]], 'b'], ['leg-right', [[16,9],[18,9],[25,25],[23,25]], 'b'],
+      ['crossbar', rect(11,17,10,1.5), 'b'], ['needle', rect(15.25,9,1.5,10), 'b'],
+      ['point', [[14,19],[18,19],[16,23]], 'a', 0],
+      ['head', rect(13,4,6,5), 'b'], ['cap', rect(15,1.5,2,2.5), 'a']],
+    eyes: [[14,5.5,1.5],[16.5,5.5,1.5]] },
+  { id: 'ghost', d: 1.5, pieces: [
+      ['body', [[8,7],[18,7],[18,9],[20,9],[20,13],[26,13],[26,23],[22,23],[22,26],[14,26],[14,22],[18,22],[18,18],[13,18],[13,16],[11,16],[11,18],[8,18]], 'b']],
+    flats: [[21,17,3,3,'b'],[22,14,2,2,'g']],
+    eyes: [[10,10,2],[14.5,10,2]] },
+  { id: 'crane', d: 1.5, pieces: [
+      ['foot-left', rect(13,26,3,1.5), 'b'], ['foot-right', rect(17.5,26,3,1.5), 'b'],
+      ['leg-left', rect(14,21,1.5,5), 'b'], ['leg-right', rect(18.5,21,1.5,5), 'b'],
+      ['knee', rect(18.25,23,2,2), 'a'],
+      ['body', rect(13,14,8,7), 'b'],
+      ['wing', rect(17,15.5,8,2), 'b'], ['tail', rect(19,17.5,8,1.5), 'b'],
+      ['neck', rect(13,9,3,5), 'b'],
+      ['beak', rect(5,7,6,1.5), 'b'], ['head', rect(11,5,6,4), 'b'],
+      ['cap', rect(13.5,2.5,3,2.5), 'a']],
+    eyes: [[12,6,1.5],[14.5,6,1.5]] },
+  { id: 'blueprint', d: 2, pieces: [
+      ['leg-left', rect(12,22,3,4), 'b'], ['leg-right', rect(19,22,3,4), 'b'],
+      ['body', rect(12,14,10,8), 'b'],
+      ['sheet-1', rect(11,12.5,12,1.5), 'b', 3], ['sheet-2', rect(9.5,11,12,1.5), 'b', 3], ['sheet-3', rect(8,9.5,12,1.5), 'b', 3]],
+    flats: [[13.5,15.5,3.5,3.5,'a']],
+    eyes: [[14.5,16.5,1.5],[18.5,16.25,2]] },
+]
+
+const BLOCK_FILL = { b: BLOCK_BODY, a: BLOCK_ACCENT, g: BLOCK_GREY }
+/** A block at work: its body in the accent, its accent pieces in the body's warm white, so the ones working stand out. */
+const BLOCK_FILL_ACTIVE = { b: BLOCK_ACCENT, a: BLOCK_BODY, g: BLOCK_GREY }
+
+/** The fills a block's look draws in: the accent body while it runs. */
+function blockFillOf(look) {
+  return look === 'running' ? BLOCK_FILL_ACTIVE : BLOCK_FILL
+}
+
+/** Each character's bounds on the design grid, depth included, worked out once. */
+function blockFit(one) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  for (const [, pts, , depth] of one.pieces) {
+    const d = depth ?? one.d
+    for (const [x, y] of pts) {
+      x0 = Math.min(x0, x); y0 = Math.min(y0, y - d); x1 = Math.max(x1, x + d); y1 = Math.max(y1, y)
+    }
+  }
+  // fitted to a 34 by 34 box centred on the 40 grid
+  const s = 34 / Math.max(x1 - x0, y1 - y0)
+  return { s, ox: 20 - ((x0 + x1) / 2) * s, oy: 20 - ((y0 + y1) / 2) * s }
+}
+const BLOCK_FITS = BLOCKS.map(blockFit)
+
+/** Flat silhouettes for small Desktop previews, in the same character order. */
+const BLOCK_PREVIEWS = [
+  [BLOCKS[0].pieces[0][1]],
+  [[[6,7],[26,7],[26,9],[19,9],[19,17],[21,17],[21,23],[20,23],[20,26],[17,26],[17,23],[15,23],[15,26],[12,26],[12,23],[11,23],[11,17],[13,17],[13,9],[6,9]]],
+  [[[9,5],[19,5],[19,7],[21,7],[21,9],[19,9],[19,15],[21,15],[21,19],[19,19],[19,26],[15,26],[15,23],[13,23],[13,26],[9,26],[9,19],[7,19],[7,15],[9,15],[9,9],[7,9],[7,7],[9,7]]],
+  [[[11,6],[19,6],[19,10],[22,10],[22,15],[24,15],[24,24],[25,24],[25,27],[21,27],[21,24],[18,24],[18,27],[14,27],[14,24],[11,24],[11,27],[7,27],[7,24],[8,24],[8,10],[11,10]]],
+  [rect(8,7,16,2), rect(9,9,2,9), rect(21,9,2,9), [[6,18],[12,18],[12,15],[20,15],[20,18],[26,18],[26,20],[25,20],[25,26],[23,26],[23,20],[9,20],[9,26],[7,26],[7,20],[6,20]]],
+  [[[13,4],[19,4],[19,9],[18,9],[25,25],[27,25],[27,27],[22,27],[22,25],[16,12],[10,25],[10,27],[5,27],[5,25],[7,25],[14,9],[13,9]], rect(11,17,10,1.5)],
+  [BLOCKS[6].pieces[0][1]],
+  [[[11,5],[17,5],[17,9],[16,9],[16,14],[21,14],[21,15.5],[25,15.5],[25,17.5],[27,17.5],[27,19],[21,19],[21,21],[20,21],[20,26],[20.5,26],[20.5,27.5],[17.5,27.5],[17.5,26],[18.5,26],[18.5,21],[15.5,21],[15.5,26],[16,26],[16,27.5],[13,27.5],[13,26],[14,26],[14,21],[13,21],[13,9],[11,9],[11,8.5],[5,8.5],[5,7],[11,7]]],
+  [[[8,9.5],[20,9.5],[20,11],[21.5,11],[21.5,12.5],[23,12.5],[23,14],[22,14],[22,26],[19,26],[19,22],[15,22],[15,26],[12,26],[12,14],[11,14],[11,12.5],[9.5,12.5],[9.5,11],[8,11]]],
+]
+
+/** One block character on the 40 grid: `which` 0 to 8, `look` the status look, `u` the document's id prefix. */
+function blockBody(which, look, u, compact = false) {
+  const one = BLOCKS[which]
+  const { s, ox, oy } = BLOCK_FITS[which]
+  // A tenth of a design unit is below a display pixel at preview sizes.
+  const precision = compact ? 10 : 100
+  const n = v => String(Math.round(v * precision) / precision)
+  const X = x => n(ox + x * s)
+  const Y = y => n(oy + y * s)
+  const poly = (pts, fill) => `<polygon points="${pts.map(([x, y]) => `${X(x)},${Y(y)}`).join(' ')}" fill="${fill}"/>`
+  let out = ''
+  const pieces = compact
+    ? [...BLOCK_PREVIEWS[which].map(points => ['preview', points, 'b', 0]), ...one.pieces.filter(piece => piece[2] === 'a').map(piece => [...piece.slice(0, 3), 0])]
+    : one.pieces
+  for (const [, pts, fillKey, depth] of pieces) {
+    const d = depth ?? one.d
+    const fill = blockFillOf(look)[fillKey]
+    if (d > 0) {
+      for (let i = 0; i < pts.length; i++) {
+        const [ax, ay] = pts[i]
+        const [bx, by] = pts[(i + 1) % pts.length]
+        // an edge shows a face when it looks up or right: its outward normal (ey, -ex) against the depth direction (1, -1)
+        if (by - ay + (bx - ax) > 0) out += poly([[ax, ay], [bx, by], [bx + d, by - d], [ax + d, ay - d]], fill)
+      }
+    }
+    out += poly(pts, fill)
+  }
+  for (const [x, y, w, h, fillKey] of one.flats ?? []) out += poly(rect(x, y, w, h), blockFillOf(look)[fillKey])
+  for (const [x1, y1, x2, y2] of compact ? [] : one.lines ?? []) out += `<line x1="${X(x1)}" y1="${Y(y1)}" x2="${X(x2)}" y2="${Y(y2)}"/>`
+  let eyes = ''
+  for (const [x, y, e] of one.eyes) {
+    if (look === 'done') eyes += `<polyline points="${X(x)},${Y(y + e)} ${X(x + e / 2)},${Y(y)} ${X(x + e)},${Y(y + e)}" fill="none" stroke-width="${n(0.35 * s)}"/>`
+    else if (look === 'failed') eyes += `<path d="M${X(x)} ${Y(y)}L${X(x + e)} ${Y(y + e)}M${X(x + e)} ${Y(y)}L${X(x)} ${Y(y + e)}" fill="none" stroke-width="${n(0.35 * s)}"/>`
+    else if (look === 'idle') eyes += `<line x1="${X(x)}" y1="${Y(y + e / 2)}" x2="${X(x + e)}" y2="${Y(y + e / 2)}" stroke-width="${n(0.35 * s)}"/>`
+    else {
+      // open eyes: an ink square with a body-coloured pupil, looking up while it waits
+      const p = e * 0.4
+      const py = look === 'waiting' ? y + e * 0.1 : y + e * 0.3
+      eyes += `<rect x="${X(x)}" y="${Y(y)}" width="${n(e * s)}" height="${n(e * s)}" fill="${BLOCK_INK}" stroke="none"/><rect x="${X(x + e * 0.3)}" y="${Y(py)}" width="${n(p * s)}" height="${n(p * s)}" fill="${BLOCK_BODY}" stroke="none"/>`
+    }
+  }
+  const openPreview = compact && (look === 'running' || look === 'waiting')
+  if (openPreview) eyes = eyes.replace(/ stroke="none"/g, '').replace(/ fill="#141414"/g, '')
+  const eyePaint = openPreview ? ` fill="${BLOCK_INK}" stroke="none"` : ''
+  const joins = compact ? '' : ' stroke-linejoin="miter"'
+  return `<g class="${u}-bob" stroke="${BLOCK_INK}" stroke-width="0.6"${joins}${look === 'idle' ? ' opacity=".8"' : ''}>${out}<g class="${u}-eyes"${eyePaint}>${eyes}</g></g>`
+}
+
+function block(c) {
+  const which = c.role === 'main' ? 0 : pickOf(`${c.seed}b`) % BLOCKS.length
+  return { body: blockBody(which, c.look, c.u, c.compact), isDotted: true, css: c.animated ? blockMotion(c.u, c.look) : '' }
+}
+
+function mood(c) {
+  const { c1, c2, look } = c
+  const k = INK
+  let face
+  if (look === 'done') face = `<path d="M11 18q3-4 6 0M23 18q3-4 6 0" stroke="${k}" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M14 25q6 6 12 0" stroke="${k}" stroke-width="2" fill="none" stroke-linecap="round"/>`
+  else if (look === 'failed') face = `<path d="M12 15l4 4M16 15l-4 4M24 15l4 4M28 15l-4 4" stroke="${k}" stroke-width="2" stroke-linecap="round"/><path d="M14 28q6-5 12 0" stroke="${k}" stroke-width="2" fill="none" stroke-linecap="round"/>`
+  else if (look === 'waiting') face = `<path d="M11 12l5-1M24 11l5 1" stroke="${k}" stroke-width="2" stroke-linecap="round"/><circle cx="14" cy="18" r="2.2" fill="${k}"/><circle cx="26" cy="18" r="2.2" fill="${k}"/><circle cx="20" cy="27" r="2.6" fill="none" stroke="${k}" stroke-width="2"/>`
+  else if (look === 'idle') face = `<path d="M11 19h6M23 19h6" stroke="${k}" stroke-width="2" stroke-linecap="round"/><path d="M16 27h8" stroke="${k}" stroke-width="2" stroke-linecap="round"/><text x="29" y="10" font-size="8" fill="${c1}" font-family="sans-serif">z</text>`
+  else face = `<circle cx="16" cy="18" r="2.2" fill="${k}"/><circle cx="27" cy="18" r="2.2" fill="${k}"/><path d="M16 26h9" stroke="${k}" stroke-width="2" stroke-linecap="round"/>`
+  return { body: `<circle cx="20" cy="20" r="17" fill="${c2}"/><circle cx="20" cy="20" r="17" fill="none" stroke="${c1}" stroke-width="2.5"/>${face}`, isDotted: false }
+}
+
+function critter(c) {
+  const { c1, c2, seed } = c
+  const k = INK
+  const t = pickOf(`${seed}c`) % 6
+  const ears = [
+    `<polygon points="8,15 11,4 17,11" fill="${c1}"/><polygon points="32,15 29,4 23,11" fill="${c1}"/>`,
+    `<circle cx="10" cy="10" r="5" fill="${c1}"/><circle cx="30" cy="10" r="5" fill="${c1}"/>`,
+    `<rect x="11" y="1" width="6" height="15" rx="3" fill="${c1}"/><rect x="23" y="1" width="6" height="15" rx="3" fill="${c1}"/>`,
+    `<polygon points="9,12 6,3 15,9" fill="${c1}"/><polygon points="31,12 34,3 25,9" fill="${c1}"/>`,
+    '',
+    `<polygon points="7,16 13,2 19,12" fill="${c1}"/><polygon points="33,16 27,2 21,12" fill="${c1}"/>`,
+  ][t]
+  const face =
+    t === 4
+      ? `<circle cx="13" cy="13" r="6" fill="${c1}"/><circle cx="27" cy="13" r="6" fill="${c1}"/><circle cx="13" cy="13" r="3" fill="#ede7da"/><circle cx="27" cy="13" r="3" fill="#ede7da"/><circle cx="13" cy="13" r="1.6" fill="${k}"/><circle cx="27" cy="13" r="1.6" fill="${k}"/>`
+      : t === 3
+        ? `<circle cx="15" cy="20" r="3.4" fill="#ede7da"/><circle cx="25" cy="20" r="3.4" fill="#ede7da"/><circle cx="15" cy="20" r="1.8" fill="${k}"/><circle cx="25" cy="20" r="1.8" fill="${k}"/>`
+        : `<circle cx="15" cy="20" r="1.9" fill="${k}"/><circle cx="25" cy="20" r="1.9" fill="${k}"/>`
+  const snout = t === 5 ? `<path d="M14 26q6 6 12 0z" fill="${c2}"/><circle cx="20" cy="26" r="1.5" fill="${k}"/>` : `<ellipse cx="20" cy="26" rx="4" ry="2.6" fill="${c2}"/><circle cx="20" cy="25.4" r="1.2" fill="${k}"/>`
+  return { body: `${ears}<ellipse cx="20" cy="22" rx="14" ry="13" fill="${c1}"/>${face}${snout}`, isDotted: true }
+}
+
+function pixel(c) {
+  const { c1, c2, seed } = c
+  const h = pickOf(`${seed}#`)
+  let out = '<rect x="2" y="2" width="36" height="36" rx="9" fill="#232323"/>'
+  for (let y = 0; y < 5; y++) {
+    for (let x = 0; x < 3; x++) {
+      if (!((h >> (y * 3 + x)) & 1)) continue
+      const fill = (h >> (15 + y)) & 1 ? c2 : c1
+      for (const col of x === 2 ? [2] : [x, 4 - x]) out += `<rect x="${n2(7 + col * 5.2)}" y="${n2(7 + y * 5.2)}" width="5.2" height="5.2" fill="${fill}"/>`
+    }
+  }
+  return { body: out, isDotted: true }
+}
+
+/** A monogram's two letters: the name's first, then its second consonant (else its second letter), as "Bl" for builder. */
+function monogramOf(name) {
+  const letters = Array.from(String(name).trim())
+  if (letters.length === 0) return '?'
+  const consonants = letters.filter(ch => !/[aeiou]/i.test(ch))
+  const second = consonants[1] ?? letters[1] ?? ''
+  return `${letters[0].toUpperCase()}${second.toLowerCase()}`
+}
+
+function mono(c) {
+  const { c1, name } = c
+  return {
+    body: `<rect x="3" y="3" width="34" height="34" rx="10" fill="${c1}"/><text x="20" y="25.5" text-anchor="middle" font-size="14" font-weight="500" fill="#ede7da" font-family="sans-serif">${esc(monogramOf(name))}</text>`,
+    isDotted: true,
+  }
+}
+
+function orbit(c) {
+  const { c1, c2, h, role } = c
+  if (role === 'main') {
+    let rays = ''
+    for (let i = 0; i < 8; i++) {
+      const t = (i * Math.PI) / 4
+      rays += `<line x1="${n2(20 + Math.cos(t) * 11)}" y1="${n2(20 + Math.sin(t) * 11)}" x2="${n2(20 + Math.cos(t) * 16)}" y2="${n2(20 + Math.sin(t) * 16)}" stroke="${c2}" stroke-width="2.4" stroke-linecap="round"/>`
+    }
+    return { body: `${rays}<circle cx="20" cy="20" r="8" fill="${c1}"/>`, isDotted: true }
+  }
+  const ang = ((h % 360) * Math.PI) / 180
+  return {
+    body: `<ellipse cx="20" cy="20" rx="16" ry="7" fill="none" stroke="${c2}" stroke-width="1.6" transform="rotate(-25 20 20)"/><circle cx="20" cy="20" r="8.5" fill="${c1}"/><circle cx="${n2(20 + Math.cos(ang) * 15)}" cy="${n2(20 + Math.sin(ang) * 7)}" r="2.6" fill="${c2}"/>`,
+    isDotted: true,
+  }
+}
+
+function bauhaus(c) {
+  const { c1, c2, seed, u } = c
+  const h = pickOf(`${seed}b`)
+  const clip = `${u}-clip`
+  const shape = [
+    `<rect x="20" y="0" width="20" height="40" fill="${c2}"/>`,
+    `<polygon points="0,40 40,40 20,14" fill="${c2}"/>`,
+    `<circle cx="20" cy="40" r="16" fill="${c2}"/>`,
+    `<rect x="0" y="0" width="20" height="20" fill="${c2}"/><rect x="20" y="20" width="20" height="20" fill="${c2}"/>`,
+  ][(h >> 4) % 4]
+  return {
+    defs: `<clipPath id="${clip}"><circle cx="20" cy="20" r="17"/></clipPath>`,
+    body: `<g clip-path="url(#${clip})"><rect width="40" height="40" fill="${c1}"/><g transform="rotate(${(h % 4) * 90} 20 20)">${shape}</g><circle cx="${12 + ((h >> 7) % 16)}" cy="${12 + ((h >> 9) % 16)}" r="3.5" fill="#141414"/></g>`,
+    isDotted: true,
+  }
+}
+
+function ring(c) {
+  const { c1, look, name, progress, u } = c
+  const length = 2 * Math.PI * 15
+  const known = typeof progress === 'number' && Number.isFinite(progress)
+  const frac = known ? Math.min(1, Math.max(0, progress)) : look === 'done' || look === 'failed' ? 1 : look === 'idle' ? 0 : 0.5
+  const initial = Array.from(String(name).trim())[0] ?? '?'
+  const arc = frac > 0 ? `<g class="${u}-spin"><circle cx="20" cy="20" r="15" fill="none" stroke="${LOOK_HUE[look]}" stroke-width="3.5" stroke-dasharray="${n2(length * frac)} ${n2(length)}" transform="rotate(-90 20 20)" stroke-linecap="round"/></g>` : ''
+  return {
+    body: `<circle cx="20" cy="20" r="15" fill="#1f1f1f" stroke="#333" stroke-width="3.5"/>${arc}<text x="20" y="25" text-anchor="middle" font-size="13" font-weight="500" fill="${c1}" font-family="sans-serif">${esc(initial.toUpperCase())}</text>`,
+    isDotted: false,
+    isSpun: !known && look === 'running',
+  }
+}
+
+function glyph(c) {
+  const { c1, h } = c
+  return {
+    body: `<rect x="3" y="3" width="34" height="34" rx="6" fill="#0c0c0c" stroke="#2b2b2b"/><text x="20" y="27" text-anchor="middle" font-size="19" fill="${c1}" font-family="monospace">${GLYPHS[h % GLYPHS.length]}</text>`,
+    isDotted: true,
+  }
+}
+
+function blob(c) {
+  const { c1, c2, u } = c
+  const fill = `${u}-fill`
+  return {
+    defs: `<linearGradient id="${fill}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c2}"/><stop offset="1" stop-color="${c1}"/></linearGradient>`,
+    body: `<path d="M20 4c9 0 15 6 15 15v15c0 2-2 3-3 2l-3-2-3 2-3-2-3 2-3-2-3 2-3-2-3 2c-1 1-3 0-3-2V19C5 10 11 4 20 4z" fill="url(#${fill})"/><ellipse cx="15" cy="19" rx="2.6" ry="3.2" fill="#ede7da"/><ellipse cx="25" cy="19" rx="2.6" ry="3.2" fill="#ede7da"/><circle cx="15.6" cy="19.6" r="1.4" fill="#1a1a1a"/><circle cx="25.6" cy="19.6" r="1.4" fill="#1a1a1a"/>`,
+    isDotted: true,
+  }
+}
+
+const DRAW = { block, mood, critter, pixel, mono, orbit, bauhaus, ring, glyph, blob }
+
+/** What a style draws for `agent` with `opts`: its context, then its parts (see the styles above). */
+function partsOf(style, agent, opts) {
+  const which = styleOf(style)
+  const seed = seedOf(agent)
+  const h = pickOf(seed)
+  const [c1, c2] = PALETTE[h % PALETTE.length]
+  const look = lookOf(agent && agent.status)
+  const name = agent && typeof agent.name === 'string' && agent.name.trim() ? agent.name : seed
+  const role = agent && agent.role === 'main' ? 'main' : ''
+  const progress = agent && typeof agent.progress === 'number' && Number.isFinite(agent.progress) ? agent.progress : undefined
+  const animated = opts.animated === true
+  const compact = which === 'block' && opts.compact === true
+  const isDotted = opts.dot !== false
+  const ground = typeof opts.ground === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(opts.ground) ? opts.ground : GROUND
+  const size = typeof opts.size === 'number' && opts.size > 0 && Number.isFinite(opts.size) ? opts.size : 40
+  const u = opts.id ? idOf(opts.id) : `av${hash([which, seed, look, which === 'mono' || which === 'ring' ? name : '', role, which === 'ring' ? progress ?? '' : '', size, animated, isDotted, ground, ...(compact ? ['compact'] : [])].join('|')).toString(36)}`
+  // the prefix names only what this style draws: a block whose todo list moves on keeps its document, so its image or frame never loads again for it
+  const c = { c1, c2, seed, h, look, name, role, progress, u, animated, compact }
+  const drawn = DRAW[which](c)
+  const dotted = isDotted && drawn.isDotted
+  // the other styles' light motion: a dot that pulses while at work, a ring with no progress to show that spins
+  const extra = !animated
+    ? ''
+    : [
+        // a block moves itself and keep their dot still; the others' dot pulses at work
+        dotted && look === 'running' && which !== 'block' ? `.${u}-dot{animation:${u}-ping 1.8s ease-in-out infinite}@keyframes ${u}-ping{0%,100%{fill-opacity:1}50%{fill-opacity:.4}}` : '',
+        drawn.isSpun ? `.${u}-spin{transform-origin:20px 20px;animation:${u}-spin 1.6s linear infinite}@keyframes ${u}-spin{to{transform:rotate(360deg)}}` : '',
+      ].join('')
+  const motion = (drawn.css ?? '') + extra
+  // asked for less motion, the reader gets none: every animation in the document stops
+  const css = motion ? `${motion}@media (prefers-reduced-motion:reduce){.${u} *{animation:none!important}}` : ''
+  return { ...drawn, c, isDotted: dotted, ground, size, css }
+}
+
+/** The status dot, as the gallery drew it: at the face's foot, ringed in the ground. */
+function dotOf(c, ground) {
+  return `<circle class="${c.u}-dot" cx="33" cy="33" r="6" fill="${LOOK_HUE[c.look]}" stroke="${ground}" stroke-width="3"/>`
+}
+
+const made = new Map()
+
+/** `make()` once per `key` while the module lives (the newest 400 kept). */
+function memo(key, make) {
+  const known = made.get(key)
+  if (known !== undefined) return known
+  const value = make()
+  if (made.size >= 400) made.delete(made.keys().next().value)
+  made.set(key, value)
+  return value
+}
+
+/**
+ * One agent's avatar in `style` as a whole SVG document.
+ *
+ * `agent`: `{ id, name, role, status, progress? }`. It is seeded by its id
+ * (else its name), so an agent keeps its look; `role` 'main' is the
+ * Orchestrator; `status` is the deck's (starting, running, waiting, done,
+ * failed, idle, or stopped); `progress` (0 to 1) fills a progress ring.
+ *
+ * `opts`: `compact` (flat block previews for dense Desktop views),
+ * `animated` (its status's motion; off by default), `size` (CSS px square; 40), `dot` (false leaves the status dot off), `id` (the document's
+ * id prefix; by default one made from everything it draws, so two documents
+ * that differ never share an id), `ground` (the colour the dot is ringed in).
+ */
+export function avatarSvg(style, agent, opts = {}) {
+  const options = opts && typeof opts === 'object' ? opts : {}
+  const key = JSON.stringify([style, agent && agent.id, agent && agent.name, agent && agent.role, agent && agent.status, agent && agent.progress, options.animated, options.compact, options.size, options.dot, options.id, options.ground])
+  return memo(key, () => {
+    const p = partsOf(style, agent, options)
+    return [
+      `<svg xmlns="http://www.w3.org/2000/svg" class="${p.c.u}" width="${n2(p.size)}" height="${n2(p.size)}" viewBox="0 0 40 40">`,
+      p.css ? `<style>${p.css}</style>` : '',
+      p.defs ? `<defs>${p.defs}</defs>` : '',
+      p.body,
+      p.isDotted ? dotOf(p.c, p.ground) : '',
+      '</svg>',
+    ].join('')
+  })
+}
+
+/** The px a stack of `n` faces `size` square takes across, each after the first `overlap` px over the one before. */
+export function stackWidth(n, size, overlap = 5) {
+  return n <= 0 ? 0 : size + (n - 1) * (size - overlap)
+}
+
+/**
+ * Faces side by side in one SVG document, each after the first `overlap` px
+ * over the one before and set on a plate of `ground` so they read apart: an
+ * editors' stack. A null is a grey disc (one the state does not hold). Still,
+ * with no status dots.
+ */
+export function avatarStackSvg(style, agents, opts = {}) {
+  const list = Array.isArray(agents) ? agents : []
+  const size = typeof opts.size === 'number' && opts.size > 0 ? opts.size : 20
+  const overlap = typeof opts.overlap === 'number' ? opts.overlap : 5
+  const ground = typeof opts.ground === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(opts.ground) ? opts.ground : GROUND
+  const width = stackWidth(list.length, size, overlap)
+  const k = n2(size / 40)
+  const faces = list.map((agent, i) => {
+    const at = `translate(${n2(i * (size - overlap))} 0) scale(${k})`
+    const plate = `<rect width="40" height="40" rx="13" fill="${ground}"/>`
+    if (!agent) return `<g transform="${at}">${plate}<circle cx="20" cy="20" r="15" fill="#262626"/></g>`
+    const p = partsOf(style, agent, { dot: false, compact: opts.compact === true, id: `${opts.id ? idOf(opts.id) : 'st'}${i}-${hash(seedOf(agent)).toString(36)}` })
+    return `<g transform="${at}">${plate}<g transform="translate(2.5 2.5) scale(.875)">${p.defs ? `<defs>${p.defs}</defs>` : ''}${p.body}</g></g>`
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${n2(width)}" height="${n2(size)}" viewBox="0 0 ${n2(width)} ${n2(size)}">${faces.join('')}</svg>`
+}
+
+/** A braille cell's dots by row (0 to 3), its left column then its right. */
+const DOTS = [
+  [0x01, 0x02, 0x04, 0x40],
+  [0x08, 0x10, 0x20, 0x80],
+]
+
+/**
+ * A pixel sprite in two braille cells, a mirrored 4 by 4 grid as the SVG
+ * sprite's 5 by 5 is: its left half lit by the seed's hash (the SVG
+ * sprite's), five dots at least, its right half the left's mirror.
+ */
+function brailleSprite(seed) {
+  const h = pickOf(`${seed}#`)
+  let lit = []
+  for (let row = 0; row < 4; row++) for (let col = 0; col < 2; col++) if ((h >> (row * 2 + col)) & 1) lit.push([row, col])
+  // too sparse to read as a sprite: the seed's next eight bits as well
+  if (lit.length < 5) for (let row = 0; row < 4; row++) for (let col = 0; col < 2; col++) if ((h >> (8 + row * 2 + col)) & 1 && !lit.some(([r, c]) => r === row && c === col)) lit.push([row, col])
+  if (lit.length < 5) lit = [[0, 1], [1, 0], [1, 1], [2, 0], [3, 1]]
+  let left = 0
+  let right = 0
+  for (const [row, col] of lit) {
+    left |= DOTS[col][row]
+    right |= DOTS[1 - col][row]
+  }
+  return String.fromCharCode(0x2800 + left, 0x2800 + right)
+}
+
+/** The cells a style's terminal face takes: two for a pixel sprite, one for every other. */
+export function terminalCells(style) {
+  return styleOf(style) === 'pixel' ? 2 : 1
+}
+
+/** How full a progress ring is, as a pie: ○ ◔ ◑ ◕ ●. */
+function pieOf(frac) {
+  if (frac <= 0) return '○'
+  if (frac >= 1) return '●'
+  return frac < 0.375 ? '◔' : frac < 0.625 ? '◑' : '◕'
+}
+
+/** A name's first letter or digit that takes one cell (else its seed's), upper case. */
+function initialOf(name, seed) {
+  for (const text of [name, seed]) {
+    const one = Array.from(String(text)).find(ch => /[\p{L}\p{N}]/u.test(ch) && ch.codePointAt(0) < 0x1100)
+    if (one) return one.toUpperCase()
+  }
+  return '?'
+}
+
+/**
+ * Each style on the terminal, which draws no SVG: one cell from the face's
+ * context (as `partsOf` makes it) as `{ glyph, color, background?, bold? }`.
+ * They were chosen from mocks drawn in Cascadia Mono.
+ */
+const TERMINAL = {
+  block: c => ({ glyph: BLOCK_GLYPHS[c.role === 'main' ? 0 : pickOf(`${c.seed}b`) % BLOCKS.length], color: c.look === 'running' ? BLOCK_ACCENT : BLOCK_BODY }),
+  mood: c => ({ glyph: c.look === 'done' || c.look === 'idle' ? '☺' : c.look === 'failed' ? '☹' : '☻', color: c.c1 }),
+  critter: c => ({ glyph: 'ᴥ', color: c.c1 }),
+  pixel: c => ({ glyph: brailleSprite(c.seed), color: c.c1 }),
+  mono: c => ({ glyph: initialOf(c.name, c.seed), color: '#ede7da', background: c.c1, bold: true }),
+  orbit: c => (c.role === 'main' ? { glyph: '☼', color: c.c2 } : (pickOf(`${c.seed}o`) >> 7) & 1 ? { glyph: 'ʘ', color: c.c2 } : { glyph: '⁂', color: c.c1 }),
+  bauhaus: c => ({ glyph: BAUHAUS_GLYPHS[pickOf(`${c.seed}b`) % BAUHAUS_GLYPHS.length], color: c.c1 }),
+  ring: c => ({ glyph: pieOf(c.progress ?? (c.look === 'done' || c.look === 'failed' ? 1 : c.look === 'idle' ? 0 : 0.5)), color: LOOK_HUE[c.look] }),
+  glyph: c => ({ glyph: GLYPHS[c.h % GLYPHS.length], color: c.c1 }),
+  blob: c => ({ glyph: 'ᗣ', color: c.c2 }),
+}
+
+/**
+ * What the terminal draws for an agent in `style` (the default's when it
+ * names none), which draws no SVG: one cell, `glyph` in `color` (bold on
+ * `background` where the style tiles it), and its status's mark in the
+ * status's hue (◐ at work, ‖ waiting on you, ✓ done, ✕ failed, ◌ idle).
+ * Mood's face and a ring's pie follow the status, as their SVG does.
+ */
+export function terminalFace(agent, style) {
+  const seed = seedOf(agent)
+  const h = pickOf(seed)
+  const [c1, c2] = PALETTE[h % PALETTE.length]
+  const look = lookOf(agent && agent.status)
+  const name = agent && typeof agent.name === 'string' && agent.name.trim() ? agent.name : seed
+  const role = agent && agent.role === 'main' ? 'main' : ''
+  const progress = agent && typeof agent.progress === 'number' && Number.isFinite(agent.progress) ? Math.min(1, Math.max(0, agent.progress)) : undefined
+  const face = TERMINAL[styleOf(style)]({ c1, c2, seed, h, look, name, role, progress })
+  return { ...face, mark: LOOK_MARK[look], markColor: LOOK_HUE[look] }
+}
+
+/** An SVG document as a `data:` URL, the way an image of it is drawn. */
+export function dataUrl(svg) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+}

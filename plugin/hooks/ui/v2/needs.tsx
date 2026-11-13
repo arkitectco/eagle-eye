@@ -1,0 +1,469 @@
+/**
+ * Needs you: what Claude Code itself holds on you (the v2 state's `needs`,
+ * oldest first), at the top of Now and on the asking agent's page; nothing
+ * at all when nothing does. Each is an amber card with its age.
+ *
+ * - A question (AskUserQuestion): its header chip and words, then its
+ *   options as a list, each a plain Button with its description dim under
+ *   it, and Other… for words of your own. Several questions show one at a
+ *   time under a row of their headers, a pick moving on to the next one
+ *   still open, with Back and Next beside Submit. One question with one answer sends at the press; several, or a
+ *   multi-select one (whose options toggle), send with Submit. It goes
+ *   through the resolver the web deck's `answer` command takes
+ *   (`actions.answer`), and the card collapses to "Answered: …". One the
+ *   deck cannot answer (it reloaded since) shows its options read-only.
+ * - A permission prompt: its tool, its exact command (or path), what the
+ *   call says it does, and "Answer it in Claude Code".
+ * - Claude Code's notification: its title and its words, verbatim.
+ *
+ * Another session's (the state marked `peer`): its questions answer
+ * through its own deck, as its own window's would; what no deck answers (a
+ * permission prompt, which Claude Code takes only in its own window, and
+ * its notification) says where instead: "Answer it in its window: Terminal
+ * · site." (../../sessions `inItsWindow`). Where its deck takes nothing from
+ * here, its questions show read-only, saying why.
+ *
+ * Each card's title is a plain Button keyed `need:<id>` (W.needKeyOf, the
+ * row `j`, `k` and `n` move the focus to) that opens the asking agent's page.
+ *
+ * Pure: Kit, the state and DashActions come from the hooks module; the
+ * picks are ./answers'.
+ */
+import type { RenderElement } from 'claude-code'
+
+import { clean } from '../../format'
+import { inItsWindow } from '../../sessions'
+import { needKeyOf, type V2Need, type WebStateV2 } from '../../web'
+import type { DashActions, Kit } from '../types'
+import * as A from './answers'
+import { icon, sectionHead } from './look'
+import { P, mix } from './palette'
+import { cut, flat } from './text'
+
+/** The cards drawn whole at most; past them, a line each. */
+const MOST_CARDS = 4
+
+/** The needs drawn as cards at most; past them, a line each. */
+export const MOST_NEED_CARDS = MOST_CARDS
+/** The amber card's edge, its notes and its time, flattened from the web's translucent amber. */
+const EDGE = mix(P.wait, P.card, 0.45)
+const NOTE = mix(P.waitNote, P.card, 0.25)
+const TIME = mix(P.waitNote, P.card, 0.45)
+/** The question shown's chip in a stepped card: the amber edge, dimmer. */
+const EDGE_DIM = mix(P.wait, P.card, 0.3)
+
+/** Where the cards stand: Now, or an agent's page (that agent's alone). */
+export type NeedsWhere = 'now' | 'page'
+
+/**
+ * The section for `list` (the state's needs, or one agent's); null when it
+ * is empty. The first `cards` (four at most) a card each, the rest a line
+ * each, `lines` of them at most and "and n more" past them: fewer where the
+ * terminal is short of rows.
+ */
+export function needsSection(kit: Kit, state: WebStateV2, list: readonly V2Need[], actions: DashActions, where: NeedsWhere, cards = MOST_CARDS, lines = Infinity): RenderElement | null {
+  const { Box } = kit
+  A.prune(new Set(state.needs.map(need => need.id)), state.now)
+  if (list.length === 0) return null
+  const most = Math.max(0, Math.min(MOST_CARDS, cards))
+  const rest = list.slice(most)
+  const shown = rest.slice(0, Math.max(0, lines))
+  return (
+    <Box key={`needs:${where}`} flexDirection="column" gap={1}>
+      {sectionHead(kit, 'Needs you', list.length)}
+      {list.slice(0, most).map(need => card(kit, state, need, actions))}
+      {rest.length > 0 ? moreLines(kit, shown, actions, rest.length - shown.length, state.peer ? 'its window' : 'Claude Code') : null}
+    </Box>
+  )
+}
+
+/**
+ * What a card says of where its need is answered: `answer` under what no
+ * deck can answer (a permission prompt, Claude Code's notification), in
+ * Claude Code, or, on another session's deck (`peer`), in its window,
+ * named; `held` under a question the deck cannot answer, the same, or, where
+ * that session's deck takes nothing from here, why; `orAnswer` beside one it
+ * can, as its own window's deck says it.
+ */
+type Notes = { answer: string; held: string; orAnswer: string }
+
+function notesOf(state: Pick<WebStateV2, 'peer'>): Notes {
+  const peer = state.peer
+  const orAnswer = 'Or answer it in Claude Code.'
+  if (!peer) return { answer: 'Answer it in Claude Code.', held: 'Answer it in Claude Code.', orAnswer }
+  const answer = inItsWindow('Answer it', peer.where)
+  return { answer, held: peer.canSteer ? answer : peer.why, orAnswer }
+}
+
+/** What a need's title says: who asks, who needs your OK and for which tool, or the notification's own title, else its type in words ("Permission prompt"; one the deck does not know as sent). */
+export function needTitle(need: V2Need): string {
+  if (need.kind === 'question') {
+    const n = need.questions?.length ?? 0
+    return n > 1 ? `${need.agentName} asks ${n} questions` : `${need.agentName} asks you`
+  }
+  if (need.kind === 'permission') return `${need.agentName} needs your OK${need.tool ? ` · ${need.tool}` : ''}`
+  return need.title || need.typeText || need.type || 'Claude Code'
+}
+
+function markOf(kit: Kit, need: V2Need): RenderElement {
+  if (need.kind === 'question') return icon(kit, 'help', P.waitText, '?')
+  if (need.kind === 'permission') return icon(kit, 'shield', P.waitText, '!')
+  return icon(kit, 'bell', P.waitText, '•')
+}
+
+function card(kit: Kit, state: WebStateV2, need: V2Need, actions: DashActions): RenderElement {
+  const { Box, Text, Button } = kit
+  const answered = A.sentOf(need.id, state.now)
+  const title = needTitle(need)
+  const notes = notesOf(state)
+  return (
+    <Box key={`needs:${need.id}`} flexDirection="column" borderStyle="round" borderColor={EDGE} paddingX={1}>
+      <Box flexDirection="row" columnGap={1}>
+        <Box flexShrink={0}>{markOf(kit, need)}</Box>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>
+          <Box flexDirection="row">
+            <Box flexShrink={1} minWidth={0}>
+              <Button key={needKeyOf(need.id)} label={title} plain onPress={() => actions.openAgent(need.agent)}>
+                <Text bold color={P.waitTitle}>
+                  {title}
+                </Text>
+              </Button>
+            </Box>
+          </Box>
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={TIME}>{need.age}</Text>
+        </Box>
+      </Box>
+      <Box flexDirection="column" paddingLeft={2}>
+        {answered ? answeredLine(kit, answered.words) : need.kind === 'question' ? questionBody(kit, need, actions, state.now, notes) : need.kind === 'permission' ? permissionBody(kit, need, notes) : notificationBody(kit, need, notes)}
+      </Box>
+    </Box>
+  )
+}
+
+function answeredLine(kit: Kit, words: string): RenderElement {
+  const { Text } = kit
+  return (
+    <Text wrap="wrap">
+      <Text color={P.doneText}>✓ </Text>
+      <Text color={P.fg2}>{`Answered: ${clean(words)}`}</Text>
+    </Text>
+  )
+}
+
+/** How a question's card answers: from here (at a press, or with Submit), or not at all (read-only). */
+type Mode = { canAnswer: boolean; isInstant: boolean }
+
+function questionBody(kit: Kit, need: V2Need, actions: DashActions, now: number, notes: Notes): RenderElement {
+  const { Box } = kit
+  const qs = need.questions ?? []
+  const mode: Mode = { canAnswer: need.isAnswerable, isInstant: need.isAnswerable && A.isInstant(need) }
+  // several questions you can answer: one at a time under a row of their headers, as Claude Code's own dialog asks them
+  const isStepped = mode.canAnswer && qs.length > 1
+  const step = isStepped ? A.stepOf(need) : 0
+  return (
+    <Box flexDirection="column" gap={1}>
+      {isStepped ? stepRow(kit, need, step, actions) : null}
+      {isStepped ? questionBlock(kit, need, step, mode, actions, now) : qs.map((q, qi) => questionBlock(kit, need, qi, mode, actions, now))}
+      {questionFoot(kit, need, mode, actions, now, notes)}
+    </Box>
+  )
+}
+
+/** Above the question shown: each question's header (its first words where it has none), a ✓ on one answered, the one shown lit; a press shows it. */
+function stepRow(kit: Kit, need: V2Need, step: number, actions: DashActions): RenderElement {
+  const { Box, Text, Button } = kit
+  const qs = need.questions ?? []
+  return (
+    <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+      {qs.map((q, qi) => {
+        const name = clean(q.header || cut(q.question, 18)).toUpperCase()
+        const isOn = qi === step
+        const isDone = A.isPicked(need, qi)
+        const words = ` ${isDone ? '✓ ' : ''}${name} `
+        return (
+          <Box key={`step:${need.id}:${qi}`} flexShrink={0}>
+            <Button
+              key={`step:${need.id}:${qi}`}
+              label={words}
+              plain
+              onPress={() => {
+                A.stepTo(need, qi)
+                actions.redraw()
+              }}
+            >
+              <Text bold={isOn} color={isOn ? P.waitTitle : isDone ? P.fg2 : P.muted} backgroundColor={isOn ? EDGE_DIM : P.chip}>
+                {words}
+              </Text>
+            </Button>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+/** Sends `answers` for `need` and notes them, so its card says "Answered: …" until it goes. */
+function send(need: V2Need, answers: Record<string, string>, actions: DashActions, now: number) {
+  A.noteSent(need.id, answers, now)
+  actions.answer(need.id, answers)
+  actions.redraw()
+}
+
+/** One question: its words (its header chip first where the questions are not stepped), its options, and the Other… field. */
+function questionBlock(kit: Kit, need: V2Need, qi: number, mode: Mode, actions: DashActions, now: number): RenderElement {
+  const { Box, Text } = kit
+  const qs = need.questions ?? []
+  const q = qs[qi]
+  if (!q) return <Box flexDirection="column" />
+  const isStepped = mode.canAnswer && qs.length > 1
+  return (
+    <Box key={`q:${need.id}:${qi}`} flexDirection="column" gap={1}>
+      <Text wrap="wrap">
+        {q.header && !isStepped ? (
+          <Text color={P.fg2} backgroundColor={P.chip}>
+            {` ${clean(q.header).toUpperCase()} `}
+          </Text>
+        ) : null}
+        {q.header && !isStepped ? <Text> </Text> : null}
+        <Text bold color={P.text}>
+          {clean(q.question)}
+        </Text>
+        {q.multiSelect ? <Text color={P.muted}>{mode.canAnswer ? '  pick any' : '  several allowed'}</Text> : null}
+      </Text>
+      <Box flexDirection="column">
+        {q.options.map((option, oi) => (mode.canAnswer ? optionButton(kit, need, qi, oi, mode, actions, now) : optionLine(kit, need, qi, oi)))}
+        {mode.canAnswer ? otherField(kit, need, qi, mode, actions, now) : null}
+      </Box>
+    </Box>
+  )
+}
+
+/**
+ * An option you can pick, as a row of a list rather than a button of its
+ * own: its number (or, in a form, its mark: ○ ● for one answer, ☐ ☑ for
+ * several), its label, and its description dim under the label. The
+ * Button's label is the mark and the words, as the page names it.
+ */
+function optionButton(kit: Kit, need: V2Need, qi: number, oi: number, mode: Mode, actions: DashActions, now: number): RenderElement {
+  const { Box, Text, Button } = kit
+  const q = (need.questions ?? [])[qi]
+  const option = q?.options[oi]
+  if (!q || !option) return <Box flexDirection="column" />
+  const pick = A.pickOf(need)
+  const isOn = q.multiSelect ? (pick.checked[qi] ?? []).includes(option.label) : pick.chosen[qi] === option.label
+  const mark = mode.isInstant ? '' : q.multiSelect ? (isOn ? '☑ ' : '☐ ') : isOn ? '● ' : '○ '
+  const lead = mode.isInstant ? `${oi + 1}.` : mark.trim()
+  const words = cut(clean(option.label), Math.max(12, kit.columns - 14))
+  const press = () => {
+    if (mode.isInstant) return send(need, { [q.question]: option.label }, actions, now)
+    if (q.multiSelect) A.toggle(need, qi, option.label)
+    else A.choose(need, qi, option.label)
+    actions.redraw()
+  }
+  return (
+    <Box key={`opt:${need.id}:${qi}:${oi}`} flexDirection="row" columnGap={1}>
+      <Box flexShrink={0} width={2}>
+        <Text color={isOn ? P.waitText : P.muted}>{lead}</Text>
+      </Box>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+        <Box flexDirection="row">
+          <Box flexShrink={1} minWidth={0}>
+            <Button key={`answer:${need.id}:${qi}:${oi}`} label={`${mark}${words}`} plain onPress={press}>
+              <Text bold color={isOn ? P.waitTitle : P.text}>
+                {words}
+              </Text>
+            </Button>
+          </Box>
+        </Box>
+        {option.description ? (
+          <Text color={P.muted} wrap="wrap">
+            {clean(option.description)}
+          </Text>
+        ) : null}
+      </Box>
+    </Box>
+  )
+}
+
+/** An option as words only, for a question the deck cannot answer. */
+function optionLine(kit: Kit, need: V2Need, qi: number, oi: number): RenderElement {
+  const { Box, Text } = kit
+  const q = (need.questions ?? [])[qi]
+  const option = q?.options[oi]
+  if (!q || !option) return <Box flexDirection="column" />
+  return (
+    <Box key={`opt:${need.id}:${qi}:${oi}`} flexDirection="column">
+      <Text wrap="wrap">
+        <Text color={P.muted3}>{q.multiSelect ? '☐ ' : '○ '}</Text>
+        <Text color={P.fg2}>{clean(option.label)}</Text>
+      </Text>
+      {option.description ? (
+        <Box paddingLeft={2}>
+          <Text color={P.muted} wrap="wrap">
+            {clean(option.description)}
+          </Text>
+        </Box>
+      ) : null}
+    </Box>
+  )
+}
+
+/**
+ * Other…: words of your own. Enter answers at once where a press would; in
+ * a form it keeps them until Submit. Each edit is kept as it is typed, so a
+ * redraw keeps the words.
+ */
+function otherField(kit: Kit, need: V2Need, qi: number, mode: Mode, actions: DashActions, now: number): RenderElement | null {
+  const { Input } = kit
+  const q = (need.questions ?? [])[qi]
+  if (!Input || !q) return null
+  return (
+    <Input
+      key={`other:${need.id}:${qi}`}
+      label="Other…"
+      placeholder={q.options.length > 0 ? 'your own answer' : 'your answer'}
+      value={A.pickOf(need).other[qi] ?? ''}
+      submitLabel={mode.isInstant ? 'answer' : 'keep'}
+      onInput={text => A.setOther(need, qi, text)}
+      onSubmit={text => {
+        const said = text.trim().slice(0, 2000)
+        if (mode.isInstant) {
+          if (said !== '') send(need, { [q.question]: said }, actions, now)
+          return
+        }
+        A.keepOther(need, qi, said)
+        actions.redraw()
+      }}
+    />
+  )
+}
+
+/** Under the questions: Submit (with Back and Next, and how many are answered, where they are stepped) and where else to answer; for a read-only question, where to answer it. */
+function questionFoot(kit: Kit, need: V2Need, mode: Mode, actions: DashActions, now: number, notes: Notes): RenderElement {
+  const { Box, Text, Button } = kit
+  if (!mode.canAnswer) return <Text color={NOTE} wrap="wrap">{notes.held}</Text>
+  if (mode.isInstant) return <Text color={NOTE} wrap="wrap">{notes.orAnswer}</Text>
+  const qs = need.questions ?? []
+  const pick = A.pickOf(need)
+  const isStepped = qs.length > 1
+  const step = A.stepOf(need)
+  const done = qs.filter((_, qi) => A.isPicked(need, qi)).length
+  const go = (qi: number) => () => {
+    A.stepTo(need, qi)
+    actions.redraw()
+  }
+  const submit = () => {
+    const answers = A.answersOf(need)
+    const missing = qs.findIndex(q => !(q.question in answers))
+    if (missing >= 0) {
+      const q = qs[missing]!
+      A.stepTo(need, missing)
+      A.noteOn(need, `Pick an answer for ${q.header || cut(q.question, 40)} first.`)
+      actions.redraw()
+      return
+    }
+    send(need, answers, actions, now)
+  }
+  const said = pick.note || (isStepped ? `${done} of ${qs.length} answered. ${notes.orAnswer}` : notes.orAnswer)
+  return (
+    <Box flexDirection="row" flexWrap="wrap" columnGap={2} alignItems="center">
+      <Box flexShrink={0}>
+        <Button key={`answer:${need.id}`} label={isStepped ? 'Submit answers' : 'Submit'} variant={isStepped && done < qs.length ? 'secondary' : 'primary'} onPress={submit} />
+      </Box>
+      {isStepped && step > 0 ? (
+        <Box flexShrink={0}>
+          <Button key={`back:${need.id}`} label="‹ Back" plain onPress={go(step - 1)}>
+            <Text color={P.fg2}>‹ Back</Text>
+          </Button>
+        </Box>
+      ) : null}
+      {isStepped && step < qs.length - 1 ? (
+        <Box flexShrink={0}>
+          <Button key={`next:${need.id}`} label="Next ›" plain onPress={go(step + 1)}>
+            <Text color={P.fg2}>Next ›</Text>
+          </Button>
+        </Box>
+      ) : null}
+      <Box flexGrow={1} flexShrink={1}>
+        <Text color={pick.note ? P.waitText : NOTE} wrap="wrap">
+          {said}
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
+/** A permission prompt: its exact command (or path), what the call says it does, and where to answer. */
+function permissionBody(kit: Kit, need: V2Need, notes: Notes): RenderElement {
+  const { Box, Text, Code } = kit
+  const what = need.command ?? need.path ?? ''
+  return (
+    <Box flexDirection="column">
+      {need.command ? <Code source={cut(clean(need.command), 2000)} language={need.tool === 'PowerShell' ? 'powershell' : 'bash'} /> : null}
+      {!need.command && need.path ? (
+        <Text color={P.fg2} wrap="wrap">
+          {clean(need.path)}
+        </Text>
+      ) : null}
+      {need.description && need.description !== what ? (
+        <Text color={P.fg2} wrap="wrap">
+          {clean(need.description)}
+        </Text>
+      ) : null}
+      {!what && !need.description && need.text ? (
+        <Text color={P.fg2} wrap="wrap">
+          {clean(need.text)}
+        </Text>
+      ) : null}
+      <Text color={NOTE} wrap="wrap">
+        {notes.answer}
+      </Text>
+    </Box>
+  )
+}
+
+/** Claude Code's notification: its words as sent, and where to answer. */
+function notificationBody(kit: Kit, need: V2Need, notes: Notes): RenderElement {
+  const { Box, Text } = kit
+  return (
+    <Box flexDirection="column">
+      <Text color={P.fg2} wrap="wrap">
+        {clean(need.text)}
+      </Text>
+      <Text color={NOTE} wrap="wrap">
+        {notes.answer}
+      </Text>
+    </Box>
+  )
+}
+
+/** Past the cards: a line a need, its title and words as one Button (keyed as its card's would be) and its age; past those, where to answer them (`inWhere`, Claude Code or its window). */
+function moreLines(kit: Kit, rest: readonly V2Need[], actions: DashActions, past = 0, inWhere = 'Claude Code'): RenderElement {
+  const { Box, Text, Button } = kit
+  return (
+    <Box key="needs:more" flexDirection="column" borderStyle="round" borderColor={P.border} paddingX={1}>
+      {rest.map(need => {
+        const words = cut(`${needTitle(need)}: ${flat(need.text)}`, 200)
+        return (
+          <Box key={`needs:line:${need.id}`} flexDirection="row" columnGap={1}>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Box flexDirection="row">
+                <Box flexShrink={1} minWidth={0}>
+                  <Button key={needKeyOf(need.id)} label={words} plain onPress={() => actions.openAgent(need.agent)}>
+                    <Text color={P.fg2}>{words}</Text>
+                  </Button>
+                </Box>
+              </Box>
+            </Box>
+            <Box flexShrink={0}>
+              <Text color={P.muted2}>{need.age}</Text>
+            </Box>
+          </Box>
+        )
+      })}
+      {past > 0 ? <Text color={P.muted2}>{rest.length > 0 ? `and ${past} more: answer ${past === 1 ? 'it' : 'them'} in ${inWhere}, or make the pane taller` : `Answer ${past === 1 ? 'it' : 'them'} in ${inWhere}, or make the pane taller`}</Text> : null}
+    </Box>
+  )
+}

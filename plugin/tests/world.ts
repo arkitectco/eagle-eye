@@ -1,0 +1,411 @@
+/**
+ * The engine in Claude Code's place for the web deck's Talk, questions and
+ * permission prompts (tests/talk.test.ts, tests/questions.test.ts): the
+ * server a child the test drives (its stdout the page's commands), every
+ * write kept, a question's dialog held open beneath the deck until the test
+ * answers it as Claude Code would (or the deck's answer abandons it), model
+ * steps the test words, and the permission events it raises.
+ */
+import type { CommandSpec, On, ProcessSpawnChunk, ProcessSpawnRequest, ProcessSpawnResult, ToolCallResult } from 'claude-code'
+import { mock, type Engine } from 'claude-code/testing'
+
+import type * as W from '../hooks/web'
+import { filesAnswerOf, filesRequestOf, gitWhere, isAttrList, isConfigList } from './tools'
+import type { DeckSnapshot } from '../types'
+
+export const NOW = 1_700_000_100_000
+export const PORT = 4321
+const PID = '4242'
+/** Eagle Eye's home in the tests (`EAGLE_EYE_HOME`): each session's state folder is `<HOME>/web/<id>`. */
+export const HOME = '/home/me/.claude/eagle-eye'
+
+/** A child the test drives: what it prints, and when it ends. */
+export type Child = { request: ProcessSpawnRequest; print: (text: string) => void; end: () => void; isRead: boolean }
+
+/** A tool call held open beneath the deck, as a dialog holds it: `settle` answers it as Claude Code would; `isAborted` once a hook above returned without it. */
+export type Held = { tool: string; id: string; e: Record<string, unknown>; isAborted: boolean; settle: (result: ToolCallResult) => void }
+
+/**
+ * A model step the test words: its visible text (streamed as one text
+ * chunk), what Claude Code shows of its thinking (each piece a chunk, in
+ * block 0, or `[block, text]`), the tools it asks for, and a gate it waits
+ * on before it ends.
+ */
+export type Step = { answer: string; thinking?: (string | readonly [number, string])[]; tools?: string[]; gate?: Promise<void> }
+
+export type World = {
+  children: Child[]
+  writes: { path: string; text: string }[]
+  sent: { to: string; text: string }[]
+  /** Why `session.send` refuses, when it does. */
+  sendRefusal: string
+  submitted: { text: string; origin: unknown }[]
+  /** Why a hook beneath drops every prompt submitted, when one does. */
+  dropPrompt: string
+  /** How the prompt box takes a fill: it does, there is none (the Desktop app), or a dialog holds the keys. */
+  fill: 'filled' | 'no_composer' | 'dialog'
+  filled: string[]
+  /** How each fill went in: over the draft, after it, or at the cursor. */
+  fillModes: string[]
+  /** What the person has typed in the prompt box, as `$.prompt.read` answers. */
+  draft: string
+  toasts: string[]
+  notices: { id: string; text: string | undefined }[]
+  /** The tools whose calls are held open (AskUserQuestion always is). */
+  holding: string[]
+  held: Held[]
+  steps: Step[]
+  /** What `tool.check` decides beneath the deck. */
+  verdict: 'allow' | 'ask' | 'deny'
+  /** A settings hook decides the permission dialog itself: none shows. */
+  isDecided: boolean
+  /** What git prints for a command run in `cwd`, in a repository the test stands up; left out, there is no repository. */
+  git?: (argv: readonly string[], cwd?: string) => { exitCode: number; stdout: string }
+  /** What `git config --list --show-scope -z` prints in `cwd` (the deck reads it before each run); left out, no settings of the repository's own. */
+  gitConfig?: (cwd: string) => { exitCode: number; stdout: string; stderr?: string }
+  /** What git prints where the deck asks where a repository's attribute files lie (`isAttrList`: its `ls-files` of `.gitattributes`, its `rev-parse --git-path info/attributes`); left out, none. */
+  gitAttrs?: (argv: readonly string[], cwd: string) => { exitCode: number; stdout: string }
+  /** What `fs.list` lists in a directory, when the test lays one out (null: there is none); left out, the testing kit's own. */
+  list?: (path: string) => { name: string; kind: 'file' | 'dir' | 'other' }[] | null
+  /** The files `fs.read` reads, by their path (`/` between parts, no drive: the engine resolves `/work` to `C:\work` on Windows), when the test gives any: `fs.read` is then the world's. */
+  files?: Readonly<Record<string, string>>
+  /** What `fs.stat` says of a path, when the test says (null: there is none); left out, every path is a file of 12 bytes, as old as NOW. `isLink`/`realPath` answer a `{ resolve: true }` stat (an untracked symbolic link, or one whose real place is to be judged); `realPath` defaults to the path itself, `kind` to `file`. */
+  stat?: (path: string) => { size: number; mtimeMs: number; kind?: 'file' | 'dir' | 'other'; isLink?: boolean; realPath?: string } | null
+  /** The plugin's own store (`$.store`: the person's prefs), when the test reads it back; left out, the testing kit's store in memory. */
+  store?: Map<string, unknown>
+  /** Each slash command the deck registered (`$.command.register`), by name. */
+  commands: string[]
+  /** The same registrations whole: the name, the description, the hint and `immediate`. */
+  registered: CommandSpec[]
+  /** Each pane opened (`$.ui.open`), as asked: its id, and the body rows it asked for. */
+  opens: { id: string; rows?: number }[]
+  /** Each permission check raised (`tool.check`: a call's, or a plugin's `$.tool.check`), its tool and input as asked. */
+  checks: { tool: string; input: unknown }[]
+  /** Each turn the deck ended (`$.turn.abort`), by its id. */
+  aborted: string[]
+  /** How many of a plugin's own permission checks (`$.tool.check`, no call) reject next, as one asked inside a turn being stopped does. */
+  checkFails: number
+  /** How many redraws the deck asked for (`$.ui.invalidate`). */
+  invalidates: number
+  /** Each node the deck ran (`$.process.run`), its arguments: the files it removes among them. */
+  nodeRuns: string[][]
+  /** Each link "Open in browser" handed web/open.js on its stdin (it answers that it opened it). */
+  browsed: string[]
+  /** Each place web/files.js was asked to read (an untracked file, an attribute file), by its whole path: it answers from `onDisk`, else `files`, as `fs.read` would. */
+  fileReads: string[]
+  /** What web/files.js finds on the disk, by whole path (`/` between parts, no drive), when the test says; left out, `files`. */
+  onDisk?: Readonly<Record<string, string>>
+  /** web/files.js's own answer for a file, by its whole path, when the test words one (a file it refused: `{ kind: 'refused', why }`); undefined, read from the disk. */
+  safeRead?: (abs: string) => Record<string, unknown> | undefined
+  /** What /cost totals (`session.usage`'s `cost.usd`), when the test moves it; left out, $1.25. */
+  costUsd?: number
+  /** The home's `debug/` folder is there: the deck writes its debug dump (`debug/<sessionId>.json`) among the writes. */
+  isDebug?: boolean
+  /** The environment the deck reads (`$.env.get`); left out, `EAGLE_EYE_HOME` alone (`HOME`): no registry folder but the home's. */
+  env?: Readonly<Record<string, string>>
+  /** Each request web/home.js was run with (the folder made private, removed, cleared, swept), as JSON. */
+  homeRequests: W.HomeRequest[]
+  /** web/home.js answers that it could not do what it was asked. */
+  isHomeRefused?: boolean
+}
+
+export function newWorld(extra: Partial<World> = {}): World {
+  return {
+    children: [],
+    writes: [],
+    sent: [],
+    sendRefusal: '',
+    submitted: [],
+    dropPrompt: '',
+    fill: 'filled',
+    filled: [],
+    fillModes: [],
+    draft: '',
+    toasts: [],
+    notices: [],
+    holding: [],
+    held: [],
+    steps: [],
+    verdict: 'ask',
+    isDecided: false,
+    commands: [],
+    registered: [],
+    opens: [],
+    checks: [],
+    aborted: [],
+    checkFails: 0,
+    invalidates: 0,
+    nodeRuns: [],
+    browsed: [],
+    fileReads: [],
+    homeRequests: [],
+    ...extra,
+  }
+}
+
+/** Whether a node run is web/home.js's, and its request. */
+export function homeRequestOf(argv: readonly string[]): W.HomeRequest | null {
+  return argv[0] === 'node' && /[\\/]web[\\/]home\.js$/.test(argv[1] ?? '') ? (JSON.parse(argv[2] ?? 'null') as W.HomeRequest) : null
+}
+
+/** Answers every engine call the deck makes, outside a repository; `restored` is the snapshot a reload finds. */
+export function world(on: On, w: World, restored?: DeckSnapshot) {
+  const store = w.store
+  if (store) {
+    on('store.get', ($, e) => ({ value: store.get(e.key) }))
+    on('store.set', ($, e) => {
+      store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+      return { value: undefined }
+    })
+    on('store.delete', ($, e) => {
+      store.delete(e.key)
+      return { value: undefined }
+    })
+    on('store.keys', () => ({ value: [...store.keys()] }))
+  } else mock.store(on)
+  mock.env(on, w.env ?? { EAGLE_EYE_HOME: HOME })
+  on('session.start', () => ({ cwd: '/work' }))
+  on('command.register', ($, e) => {
+    w.commands.push(e.name)
+    w.registered.push({ ...e })
+    return { value: { command: e.name } }
+  })
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', ($, e) => {
+    w.opens.push({ id: e.id, ...(e.rows !== undefined ? { rows: e.rows } : {}) })
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.invalidate', () => {
+    w.invalidates += 1
+    return { value: undefined }
+  })
+  on('ui.toast', ($, e) => {
+    w.toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.notice', ($, e) => {
+    w.notices.push({ id: e.tool_use_id, text: e.text })
+    return { value: undefined }
+  })
+  on('ui.render', () => ({ type: 'Text', props: {}, children: ['drawn by Claude Code'] }))
+  on('session.id', () => ({ value: 'session-1' }))
+  on('session.model', () => ({ value: 'claude-test' }))
+  on('session.usage', () => ({ value: { startedAt: NOW - 60_000, context: { window: 200_000, tokens: 24_000, percent: 12 }, rateLimits: [], cost: { usd: w.costUsd ?? 1.25 } } }))
+  on('session.messages', () => ({ value: [] }))
+  on('agent.list', () => ({ value: [] }))
+  on('process.run', ($, e) => {
+    const request = homeRequestOf(e.argv)
+    if (request) w.homeRequests.push(request)
+    // "Open in browser": web/open.js, the link on its stdin
+    if (e.argv[0] === 'node' && /[\\/]web[\\/]open\.js$/.test(e.argv[1] ?? '')) {
+      w.browsed.push(e.init?.stdin ?? '')
+      return { value: { exitCode: 0, stdout: '{"ok":true}\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    // the deck's safe reads: web/files.js, answered from the test's files
+    const reading = filesRequestOf(e)
+    if (reading) {
+      const root = reading.root.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '').replace(/\/+$/, '')
+      for (const place of reading.paths) w.fileReads.push(`${root}/${place}`)
+      const disk = w.onDisk ?? w.files
+      const said = JSON.parse(filesAnswerOf(reading, abs => disk?.[abs])) as { ok: true; files: Record<string, unknown>[] }
+      const files = said.files.map((one, i) => ({ ...(w.safeRead?.(`${root}/${reading.paths[i] ?? ''}`) ?? one), path: reading.paths[i] }))
+      return { value: { exitCode: 0, stdout: `${JSON.stringify({ ok: true, files })}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    return request
+      ? { value: { exitCode: 0, stdout: w.isHomeRefused ? '{"ok":false,"why":"refused"}\n' : '{"ok":true}\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      : e.argv[0] === 'node'
+      ? (w.nodeRuns.push([...e.argv]), { value: { exitCode: 0, stdout: `${PID}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+      : w.git && e.argv[0] === 'git'
+        ? { value: { stderr: '', ...(isAttrList(e.argv) ? (w.gitAttrs?.(e.argv, gitWhere(e)) ?? { exitCode: 0, stdout: '' }) : isConfigList(e.argv) ? (w.gitConfig?.(gitWhere(e)) ?? { exitCode: 0, stdout: '' }) : w.git(e.argv, gitWhere(e))), isStdoutTruncated: false, isStderrTruncated: false } }
+        : { value: { exitCode: 128, stdout: '', stderr: 'not a git repository', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const files = w.files
+  if (files) {
+    on('fs.read', ($, e) => {
+      const text = files[e.path.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')]
+      return text !== undefined ? { value: text } : { deny: 'no such file' }
+    })
+  }
+  const list = w.list
+  if (list) {
+    on('fs.list', ($, e) => {
+      const entries = list(e.path)
+      return entries ? { value: entries.map(one => ({ ...one, size: 0, mtimeMs: 0, isLink: false })) } : { deny: 'no such folder' }
+    })
+  }
+  // the home's `debug/` folder, while the test lays it out: the deck dumps what it believes there
+  on('fs.exists', ($, e) => ({ value: w.isDebug === true && /[\\/]eagle-eye[\\/]debug$/.test(e.path) }))
+  on('fs.stat', ($, e) => {
+    const said = w.stat ? w.stat(e.path) : { size: 12, mtimeMs: NOW }
+    if (!said) return { deny: 'no such file' }
+    const resolve = (e as { resolve?: boolean }).resolve === true
+    const isLink = said.isLink === true
+    return { value: { kind: said.kind ?? 'file', size: said.size, mtimeMs: said.mtimeMs, isLink, ...(resolve ? { realPath: said.realPath ?? e.path } : {}) } }
+  })
+  on('fs.write', ($, e) => {
+    w.writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('session.send', ($, e) => {
+    w.sent.push({ to: e.to, text: e.text })
+    return w.sendRefusal ? { isDelivered: false, reason: w.sendRefusal } : { isDelivered: true }
+  })
+  // a message a subagent's loop reads: as it came
+  on('session.receive', ($, e) => ({ text: e.text }))
+  on('prompt.fill', ($, e) => {
+    if (w.fill !== 'filled') return { isFilled: false, refusal: w.fill }
+    w.filled.push(e.text)
+    w.fillModes.push(e.mode)
+    return { isFilled: true }
+  })
+  on('prompt.read', () => ({ value: { text: w.draft, cursor: w.draft.length } }))
+  on('prompt.submit', ($, e) => {
+    w.submitted.push({ text: e.text, origin: e.origin })
+    return w.dropPrompt ? { drop: w.dropPrompt } : { text: e.text }
+  })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  on('turn.step', async function* ($, e) {
+    const step = w.steps.shift() ?? { answer: '' }
+    if (step.gate) await step.gate
+    for (const piece of step.thinking ?? []) {
+      const [index, text] = typeof piece === 'string' ? [0, piece] : piece
+      yield { kind: 'thinking' as const, index, text }
+    }
+    if (step.answer !== '') yield { kind: 'text' as const, index: 1, text: step.answer }
+    const toolUses = (step.tools ?? []).map(name => ({ name, input: {} }))
+    return { turnId: e.turnId, index: e.index, answer: step.answer, toolUses, stopReason: toolUses.length > 0 ? ('tool_use' as const) : ('end_turn' as const), usage: null }
+  })
+  on('agent.spawn', () => ({ model: 'claude-haiku', agentId: 'agent-x1' }))
+  // an ask is core's (the mode's decider): since 2.1.311 a hook's own ask goes to a person, whom a test has none of; a test's query of its own has nothing beneath, and asks
+  on('tool.check', async ($, e, next) => {
+    w.checks.push({ tool: e.tool, input: e.input })
+    if (w.checkFails > 0 && e.tool_use_id === undefined) {
+      w.checkFails -= 1
+      throw new Error('Error: The operation was aborted.')
+    }
+    if (w.verdict !== 'ask') return { decision: w.verdict }
+    try {
+      return await next(e)
+    } catch {
+      return { decision: 'ask' as const }
+    }
+  })
+  on('turn.abort', ($, e) => {
+    w.aborted.push(e.turnId)
+    return { value: undefined }
+  })
+  on('classic.Stop', () => ({}))
+  on('classic.SubagentStop', () => ({}))
+  on('classic.PermissionRequest', () => (w.isDecided ? { decision: { behavior: 'allow' as const } } : {}))
+  on('classic.PermissionDenied', () => ({}))
+  on('classic.Notification', () => ({}))
+  // a question's dialog, and the calls the test holds, stay open until the test settles them or a hook above leaves them
+  on('tool.call', ($, e, next) => {
+    if (e.tool === 'AskUserQuestion' || w.holding.includes(e.tool)) {
+      return new Promise<ToolCallResult>(resolve => {
+        const held: Held = { tool: e.tool, id: e.tool_use_id, e: JSON.parse(JSON.stringify(e)) as Record<string, unknown>, isAborted: false, settle: resolve }
+        w.held.push(held)
+        next.signal.addEventListener('abort', () => {
+          held.isAborted = true
+          resolve({ deny: 'abandoned' })
+        })
+      })
+    }
+    return e.tool.startsWith('mcp__') ? { deny: 'no such tool' } : { result: 'ok' }
+  })
+  on('mcp.call', () => ({ value: { content: [{ type: 'text', text: 'Browser pane opened.' }], isError: false } }))
+  if (restored) on('state.get', { plugin: 'eagle-eye', key: 'snapshot' }, () => ({ value: { value: restored, version: 1 } }))
+  on('process.spawn', async function* ($, e, next): AsyncGenerator<ProcessSpawnChunk, { value: ProcessSpawnResult } | { deny: string }> {
+    const queue: string[] = [`{"ready":${PORT}}\n`]
+    let wake: (() => void) | undefined
+    let isEnded = false
+    const child: Child = {
+      request: JSON.parse(JSON.stringify(e)) as ProcessSpawnRequest,
+      print: text => {
+        queue.push(text)
+        wake?.()
+      },
+      end: () => {
+        isEnded = true
+        wake?.()
+      },
+      isRead: true,
+    }
+    w.children.push(child)
+    next.signal.addEventListener('abort', () => child.end())
+    try {
+      for (;;) {
+        const text = queue.shift()
+        if (text !== undefined) {
+          yield { stream: 'stdout', text }
+          continue
+        }
+        if (isEnded) return { value: { code: 0, signal: null } }
+        await new Promise<void>(resolve => {
+          wake = resolve
+        })
+        wake = undefined
+      }
+    } finally {
+      child.isRead = false
+    }
+  })
+}
+
+/** /eagle-eye as typed at the prompt, with what the engine stamps on it. */
+export function deck(args: string) {
+  return { command: 'eagle-eye', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: true, columns: 100 } }
+}
+
+/** The session starts, you ask, the Orchestrator's turn starts and it starts scout (`agent-x1`); then `/eagle-eye web pane`, the page in the Browser pane. */
+export async function work($: Engine): Promise<void> {
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  await $.prompt.submit({ text: 'Fix the off-by-one in src/range.js', origin: { kind: 'composer' }, wait: false })
+  await $.turn.start({ text: 'Fix the off-by-one in src/range.js', turnId: 't1' })
+  await $.agent.spawn({
+    tool_use_id: 'toolu_scout',
+    prompt: 'Find the off-by-one in src/range.js',
+    description: 'Find the bug',
+    subagentType: 'Explore',
+    name: 'scout',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-test',
+    background: true,
+    fork: false,
+  })
+  await $.command.run(deck('web pane'))
+}
+
+/** Every state.json written, oldest first. */
+export function statesOf(w: World): W.WebState[] {
+  return w.writes.filter(one => /[\\/]web[\\/]session-1[\\/]state\.json$/.test(one.path)).map(one => JSON.parse(one.text) as W.WebState)
+}
+
+/** The latest state.json written. */
+export function lastState(w: World): W.WebState {
+  const states = statesOf(w)
+  const last = states[states.length - 1]
+  if (!last) throw new Error('no state.json was written')
+  return last
+}
+
+/**
+ * The page's command, as the server prints it: one line of JSON, stamped with
+ * the grade of the page's handle (web/server.js): `full`, your own browser's,
+ * unless the test says `pane`, the Browser pane's (whose words in your voice
+ * wait for your Send above the prompt).
+ */
+export function command(child: Child | undefined, cmd: Record<string, unknown>, grade: 'full' | 'pane' = 'full') {
+  if (!child) throw new Error('no server is running')
+  child.print(`${JSON.stringify({ ...cmd, grade })}\n`)
+}
+
+/** One model step of `agentId`'s loop (the Orchestrator's with none), read to its end: what it answered. */
+export async function step($: Engine, agentId: string | undefined, index: number) {
+  const stream = $.turn.step({ turnId: agentId ? `turn-${agentId}` : 't1', index, model: 'claude-test', messageCount: 3, ...(agentId ? { agentId } : {}) })
+  for await (const chunk of stream) void chunk
+  return stream.result
+}

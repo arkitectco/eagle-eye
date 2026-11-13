@@ -1,0 +1,16 @@
+{
+  "name": "eagle-eye",
+  "displayName": "Eagle Eye",
+  "version": "1.0.1",
+  "description": "See every agent and subagent in your Claude Code session while they work. A live deck in the side pane, the terminal, or your browser.",
+  "author": { "name": "Arkitect", "url": "https://github.com/arkitectco" },
+  "homepage": "https://github.com/arkitectco/eagle-eye",
+  "repository": "https://github.com/arkitectco/eagle-eye",
+  "icon": "./assets/icon.png",
+  "documentationUrl": "https://github.com/arkitectco/eagle-eye#readme",
+  "supportUrl": "https://github.com/arkitectco/eagle-eye/issues",
+  "privacyPolicyUrl": "https://github.com/arkitectco/eagle-eye#privacy",
+  "license": "Apache-2.0",
+  "keywords": ["claude-code", "mod", "agents", "subagents", "multi-agent", "dashboard", "observability", "diffs"],
+  "types": "./types/index.d.ts"
+}

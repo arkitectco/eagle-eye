@@ -1,0 +1,240 @@
+/**
+ * The types every drawing shares: the surface's elements (Kit), the state to
+ * draw (DeckModel) and the closures a press runs (Actions). The hooks module
+ * supplies all three; the screens only read them.
+ */
+import type { Elements, RenderSurface } from 'claude-code'
+
+import type { DeckData, DeckView, DeckView2 } from '../../types'
+import type { CommitDetail, FileDiff, GitState } from '../git'
+import type { HeldRow } from '../hold'
+import type { SessionRowV2, SessionsV2 } from '../sessions'
+import type { V2Band, V2Files, WebStateV2 } from '../web'
+
+type TerminalTable = Elements['terminal']
+
+export type Kit = {
+  surface: RenderSurface
+  Box: TerminalTable['Box']
+  Text: TerminalTable['Text']
+  Button: TerminalTable['Button']
+  Code: TerminalTable['Code']
+  Markdown: TerminalTable['Markdown']
+  Input?: TerminalTable['Input']
+  Select?: TerminalTable['Select']
+  Svg?: Elements['desktop']['Svg']
+  /** Where the surface runs a plugin's surface module (the terminal and the desktop): Org's chart. */
+  Client?: Elements['desktop']['Client']
+  columns: number
+  /**
+   * The terminal only: the rows the drawing may take (./v2/fit `paneRowsFor`:
+   * the pane's room, never past the terminal's height less what the rest of
+   * its screen needs). A screen that grows (Chat's messages, the Dashboard's
+   * sections) cuts itself to it. Absent elsewhere: the drawing takes what it
+   * needs, and the pane scrolls.
+   */
+  rows?: number
+  /**
+   * The terminal only: true while the pane does not hold the keyboard (its
+   * `isFocused` false), so a key the deck names (1-6, o, s) types into the
+   * prompt instead. The deck then says how to give it the keys. Absent
+   * elsewhere, and while it holds them.
+   */
+  isKeyless?: boolean
+  /** The style the screens draw agents' avatars in (web/avatars.mjs `STYLE_IDS`): the deck's setting; absent, blocks. */
+  avatarStyle?: string
+}
+
+export type UsageInfo = {
+  startedAt: number
+  contextPercent?: number
+  costUsd?: number
+  limits: { kind: string; percentUsed: number }[]
+}
+
+
+/** The web deck (`/eagle-eye web`) as the deck shows it: the header's Open in browser, the line under the header, and Settings. */
+export type WebPane = {
+  /** `off` until it is asked for, `starting` until the server says it is ready, `failed` when it could not start or stopped by itself. */
+  status: 'off' | 'starting' | 'running' | 'failed'
+  /**
+   * A link for your own browser while the server runs ('' otherwise): a
+   * `full` one-time ticket, made anew once the page it opened traded it. The
+   * terminal draws it as text to copy; the desktop draws no link, only "Open
+   * in browser", which makes its own (the model never reads either).
+   */
+  url: string
+  /** How the last try to open it in the Browser pane went; '' before the first. */
+  opened: '' | 'opened' | 'failed'
+  /** Why it is not running, in a sentence; '' when it is. */
+  note: string
+}
+
+export type DeckModel = {
+  data: DeckData
+  view: DeckView
+  git: GitState
+  fileDiff: FileDiff | null
+  commit: CommitDetail | null
+  usage: UsageInfo | null
+  /**
+   * The time the drawing shows. Screens draw only what the screen signature
+   * covers from it (a time of day, an agent's coarse elapsed time), so a
+   * redraw that changes nothing else draws the same tree.
+   */
+  now: number
+  cwd: string
+  /** The web deck; absent reads as off. */
+  web?: WebPane
+  /** What the band above the prompt says, from this session's v2 state (`W.bandOf`): null (or absent) when it says nothing. */
+  band?: V2Band | null
+  /** What the Browser pane's page sent in your voice, waiting for your Send in the band (../hold), oldest first; absent reads as none. */
+  held?: HeldRow[]
+  /** Every session on this machine is listed, dropped over the tabs (`s`, the header's title or its count of sessions, ./v2/sessions); absent reads as not. */
+  isSessionsOpen?: boolean
+}
+
+export type Actions = {
+  /** Opens the diff of Changes' file `path` (git's, read again), or closes it when it is the one open. */
+  selectFile: (path: string) => void
+  /** Opens commit `hash`'s files, or closes them when it is the one open. */
+  selectCommit: (hash: string) => void
+  /** Hides the band above the prompt, or shows it again, as `/eagle-eye band` does; the choice stays. */
+  toggleBand: () => void
+  /**
+   * Sends `text` to agent `agentId` (to the Orchestrator: your next prompt).
+   * With `ackId` (`[A-Za-z0-9_-]`, at most 40) what came of it is noted in the
+   * state's `acks` under that id, and the message carries it, as for the web
+   * page's `chat` command.
+   */
+  sendChat: (agentId: string, text: string, ackId?: string) => void
+  review: (text: string) => void
+  /** The band's Open: this session's deck (out of the sample, off an agent's page) on that tab, the pane opened. */
+  open: (tab: DeckView2['tab']) => void
+  /** Pins the deck to the repository at `root`; '' follows the work again. */
+  selectRepo: (root: string) => void
+  /** "Open in browser" (the header's, `o`, and Settings'), as `/eagle-eye web`: starts the web deck first when it is not running (never in the Browser pane; a press while it starts does nothing), then a new `full` link to the page, opened in your own browser by the system's opener (a toast when it could not). */
+  openBrowser: () => void
+  /** Send on a band row the Browser pane's page sent in your voice (../hold): it runs as your own browser's page would have run it at once. */
+  sendHeld: (key: string) => void
+  /** Discard on such a row: nothing is sent, and the page says so. */
+  discardHeld: (key: string) => void
+  /** More, or Less, on such a row too long for one line. */
+  toggleHeld: (key: string) => void
+}
+
+/** What the native dashboard's presses run, beside the deck's own (Actions). */
+export type DashActions = Actions & {
+  /** Opens agent `id`'s page over the tab in view; `b` (Back) returns to that tab. */
+  openAgent: (id: string) => void
+  /** Leaves the agent page for the tab it was opened from. */
+  back: () => void
+  /**
+   * Folds one of Now's sections to its head and one line, or opens it again,
+   * by its `DeckView.collapsed` id (./v2/dashModel's FOLD): it stays so
+   * through redraws, live updates and reloads.
+   */
+  toggleSection: (id: string) => void
+  /**
+   * Answers the question held on call `callId`, by question text: through
+   * the resolver the web deck's `answer` command takes; in the sample, in
+   * the sample alone.
+   */
+  answer: (callId: string, answers: Record<string, string>) => void
+  /** Draws again after a change of the pane's own state (a pick in a question). */
+  redraw: () => void
+  /**
+   * Reads the whole text of message `id` that the state cut (`isCut`), as the
+   * web page's `/message/<id>` serves it: `onRead` gets it (null when it cannot
+   * be read), then the pane draws again.
+   */
+  loadMessage: (id: string, onRead: (text: string | null) => void) => void
+  /**
+   * Brings the element keyed `key` into the pane's view once it is drawn:
+   * `start` puts its top at the window's top (the default), `nearest` moves the
+   * least that shows it.
+   */
+  reveal: (key: string, block?: 'start' | 'nearest') => void
+  /** Leaves the sample (`/eagle-eye demo`) for this session's own deck. */
+  exitDemo: () => void
+  /**
+   * Sets the v2 screens' own state (`DeckView.v2`: the tab, the open folds,
+   * Chat's filter, Inspect), each field checked, what `patch` leaves out
+   * kept; the pane draws again and the choice stays through reloads. An
+   * agent page is `openAgent` and `back`, as before.
+   */
+  setV2View: (patch: Partial<DeckView2>) => void
+  /**
+   * `j` (1) and `k` (-1): moves the pane's focus ring one row down or up
+   * (`$.ui.focus`) among `keys`, the rows' Button keys in the order drawn;
+   * left out, the v2 screen's own (`W.focusKeysOf`: Now's needs and tree
+   * rows, Changes' files). It holds at either end; from no row, `j` takes
+   * the first and `k` the last. The deck follows the ring (`ui.focus`).
+   */
+  focusNext: (dir: 1 | -1, keys?: readonly string[]) => void
+  /** `n`: Now, the focus on the next thing that needs you (`W.nextNeedKeyOf`: after the need focused, round to the first). */
+  focusNeed: () => void
+  /**
+   * Draws the agents' avatars in `style` (web/avatars.mjs `STYLE_IDS`) from
+   * now on, as `/eagle-eye avatars <style>` does: kept in the person's prefs, for
+   * every session; the pane draws again and the web page follows.
+   */
+  setAvatarStyle: (style: string) => void
+  /**
+   * "Clear finished" (as `/eagle-eye clear`): every agent shown that is finished
+   * (done, failed, stopped or idle) hidden from the Dashboard, Chat's members
+   * and Everyone, and Org, kept in the view through reloads. The deck's own
+   * tidying: nothing in Claude Code changes.
+   */
+  clearFinished: () => void
+  /** "Show N cleared" (as `/eagle-eye clear show`): the agents "Clear finished" hid shown again. */
+  showCleared: () => void
+  /**
+   * Stop on a background agent or a teammate at work (as the page's
+   * `stopAgent`): Claude Code's own TaskStop of it, once its permission check,
+   * asked again, allows it. In the sample, nothing is stopped.
+   */
+  stopAgent: (id: string) => void
+  /** Stop turn (as the page's `abortTurn`): `$.turn.abort` of the main loop's running turn, as Esc does. In the sample, nothing is stopped. */
+  abortTurn: () => void
+  /** Stop on a background task or Cancel on a schedule (as the page's `stopBackground`), by its row's id in `background`: TaskStop or CronDelete, once allowed. In the sample, nothing is stopped. */
+  stopBackground: (id: string) => void
+  /** `s`, the header's title or its count of sessions: every session on this machine listed, dropped over the tabs (./v2/sessions); pressed again, closed. */
+  openSessions: () => void
+  /** Closes the list of sessions. */
+  closeSessions: () => void
+  /** Shows session `id`'s deck in this one's place, from its state folder (its own deck asked to write it while it shows); this deck's own session ("here") shows this deck's own again. The list closes. */
+  openSession: (id: string) => void
+}
+
+/** What the pane draws from, beside the deck's model. */
+export type DashModel = {
+  /**
+   * The v2 view model (`deckStateOf`) of the live deck,
+   * the very one state.json's `v2` holds (built once per screen); the
+   * sample's (web/fixtures/state.v2.json, its times moved to now) while the
+   * sample shows; null while that is read or could not be.
+   */
+  v2: WebStateV2 | null
+  /** The v2 state's lazy files (an agent's file, a patch, a cut message's whole text): the live deck's, or the sample's (web/fixtures/v2/). */
+  v2Files: V2Files
+  /** The sample (`/eagle-eye demo`) is shown, not this session. */
+  isDemo: boolean
+  /** Why the sample could not be read; '' otherwise. */
+  demoNote: string
+  /** Org's chart Client failed on this surface: Org lists the agents as a tree instead, until Org is left (or /eagle-eye opens). */
+  isOrgDown: boolean
+  /** The agent Org's chart marks: the one whose page was opened last; null for none. */
+  selected: string | null
+  /**
+   * Another session's deck, shown in place of this one's (no bar: its header's
+   * title is the switcher, ./v2/sessions): its id, its row in this deck's
+   * list (null when the list holds it no more), why it shows nothing yet ('',
+   * once it does), its state as read from its folder (null until it is),
+   * marked as another session's (`peer`) with this deck's list, the list, its
+   * lazy files, and the model and presses it is drawn with (its own agent
+   * page; every press its own window has, to its own deck, what came of each
+   * in `peer.presses`). Absent or null: this session's own.
+   */
+  viewing?: { id: string; row: SessionRowV2 | null; note: string; state: WebStateV2 | null; list: SessionsV2 | null; files: V2Files; model: DeckModel; actions: DashActions } | null
+}

@@ -1,0 +1,8 @@
+{
+  "name": "eagle-eye",
+  "description": "A Claude Code mod with a live deck of every agent and subagent, wherever you already work.",
+  "owner": { "name": "Arkitect", "url": "https://github.com/arkitectco" },
+  "plugins": [
+    { "name": "eagle-eye", "source": "./plugin" }
+  ]
+}
