@@ -471,7 +471,7 @@ function handle(req, res) {
   // A site that points its own name at 127.0.0.1 (DNS rebinding) still sends that name as the Host.
   const host = (req.headers.host ?? '').toLowerCase()
   if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return send(res, 421, 'misdirected request\n')
-  const url = new URL(`http://deck${req.url.startsWith('/') ? req.url : `/${req.url}`}`) // '//x' stays a path, never a host
+  const url = new URL(`http://deck/${req.url.replace(/^\//, '')}`) // '//x' stays a path, never a host
   const route = url.pathname
   if (route === '/cmd' && req.method === 'POST') return command(req, res, host)
   if (route === '/session' && req.method === 'POST') return session(req, res, host)
