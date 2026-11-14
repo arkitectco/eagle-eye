@@ -92,7 +92,7 @@ export function numberedRowsOf(hunks: readonly Hunk[]): DiffRow[] {
 /** The web's diff, flattened over its sunken ground: the ground, each kind's wash, its numbers' ink, its mark and its words' ink. */
 const SUNK = '#111111'
 const DIFF_LOOK: Readonly<Record<DiffRow['kind'], { wash: string; gutter: string; mark: string; ink: string }>> = {
-  hunk: { wash: mix(SUNK, P.run, 0.07), gutter: '#4f4f4f', mark: ' ', ink: '#7f9fd8' },
+  hunk: { wash: mix(SUNK, P.run, 0.07), gutter: '#4f4f4f', mark: ' ', ink: P.muted },
   same: { wash: SUNK, gutter: '#4f4f4f', mark: ' ', ink: '#d4d4d4' },
   add: { wash: mix(SUNK, P.done, 0.1), gutter: mix(SUNK, P.doneText, 0.6), mark: '+', ink: '#d4d4d4' },
   del: { wash: mix(SUNK, P.fail, 0.1), gutter: mix(SUNK, P.failText, 0.6), mark: '−', ink: '#d4d4d4' },

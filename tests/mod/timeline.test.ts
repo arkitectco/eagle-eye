@@ -593,11 +593,11 @@ test('the terminal`s cells: a call a run on its colour (its tool`s name where it
   const axis = Lanes.axisOf(120_000, [], 24, 3)
   const cells = laneCellsOf({ ...timeline, marks: [{ at: 0, id: 'p', text: 'Go' }] }, lane, axis, [{ at: 55_000, n: 1, role: 'from', down: true }])
   expect(cells.map(cell => cell.ch).join('')).toBe(`◆  ─┄┄✕   ─↓✓${' '.repeat(11)}`)
-  expect(cells.map(cell => cell.bg ?? '.').slice(0, 10)).toEqual(['.', '#1d4ed8', '#1d4ed8', '.', '.', '.', '#991b1b', '#991b1b', '#b45309', '#b45309'])
+  expect(cells.map(cell => cell.bg ?? '.').slice(0, 10)).toEqual(['.', '#6a6863', '#6a6863', '.', '.', '.', '#991b1b', '#991b1b', '#b45309', '#b45309'])
   // wide enough, a segment says its tool
   const wide = laneCellsOf(timeline, { ...lane, id: 'a', spans: [{ kind: 'work', from: 0, to: 60_000 }], ticks: [[0, 30_000, 0, 1]] }, Lanes.axisOf(60_000, [], 20, 3))
   expect(wide.map(cell => cell.ch).join('')).toBe('Read      ─────────✓')
-  expect(wide[0]).toEqual({ ch: 'R', color: '#ffffff', bg: '#1d4ed8' })
+  expect(wide[0]).toEqual({ ch: 'R', color: '#ffffff', bg: '#6a6863' })
   // a shell from its call to its end
   const shell = backgroundCellsOf({ id: 'b', title: 'Start the server', what: 'Shell', by: 'main', start: 30_000, end: 90_000 }, axis)
   expect(shell.map(cell => cell.ch).join('').trimEnd()).toBe(`${' '.repeat(6)}━━━━━━━━━━━■`)
@@ -730,7 +730,7 @@ test('the desktop`s Timeline folds the hours nobody worked: the break says how l
   expect(String(main.props.source)).toMatch(/l4 -10M/)
   const shell = svgs.find(one => String(one.props.alt).startsWith('Shell · node web/dev.js'))!
   expect(shell.props.alt).toBe('Shell · node web/dev.js: Start the web dev server, ended')
-  expect(String(shell.props.source)).toContain(`fill="#a8aeb2"`)
+  expect(String(shell.props.source)).toContain(`fill="#989898"`)
   const builder = (await ui.find({ key: `tl:${IDS.builder}` }))!
   expect(builder.text).toMatch(/^builderdoneDone/)
   const lanes = (await ui.find({ key: 'org:timeline:lanes' }))!.text
@@ -777,7 +777,7 @@ test('the terminal`s Timeline: the same rows in cells fitted to its columns, eac
     expect((await ui.find({ key: `tl:now:${IDS.docs}` }))?.text).toMatch(/^Done \d+m ago: “Documented the limits/)
     for (const glyph of ['─', '┄', '✓', '✕', '■', '◆', '↓', '↑', '━']) expect(lanes.text).toContain(glyph)
     const grounds = new Set((await ui.findAll({ type: 'Text' })).map(one => one.props.backgroundColor).filter(Boolean))
-    for (const ground of ['#1d4ed8', '#991b1b', '#b45309']) expect(grounds.has(ground)).toBe(true)
+    for (const ground of ['#6a6863', '#991b1b', '#b45309']) expect(grounds.has(ground)).toBe(true)
     // the shells under the loop that started them
     const shell = (await ui.find({ key: 'tl:bg:bash_7' }))!
     expect(shell.text.startsWith('   └ Start the dev')).toBe(true)

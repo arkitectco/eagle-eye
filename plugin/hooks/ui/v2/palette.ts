@@ -11,33 +11,35 @@
  */
 import type { V2Status } from '../../web'
 
-/** The web deck's tokens, flattened to hex. */
+/** The web deck's tokens (web/arkitect-tokens.css, as web/app.css maps them), flattened to hex: one accent, terracotta, for what runs and what needs you; red for a real error; greys for the rest. */
 export const P = {
   /** Names, values that lead. */
-  text: '#fafafa',
+  text: '#ede7da',
   /** A target, a step's words: a little under `text`. */
-  fg2: '#d9d9d9',
+  fg2: '#cecece',
   /** Labels, the live call, verbs. */
-  muted: '#a1a1a1',
+  muted: '#989898',
   /** Times, model lines, counts. */
-  muted2: '#737373',
-  muted3: '#4d4d4d',
+  muted2: '#989898',
+  muted3: '#7a7a7a',
   /** A card's resting edge. */
   border: '#2a2a2a',
   /** The card ground the web mixes its tints over; for mixing only. */
   card: '#171717',
-  run: '#3b82f6',
-  wait: '#f59e0b',
-  done: '#22c55e',
-  fail: '#ef4444',
-  idle: '#a8aeb2',
-  runText: '#60a5fa',
-  waitText: '#fbbf24',
-  doneText: '#4ade80',
-  failText: '#f87171',
+  run: '#fe6a00',
+  wait: '#fe6a00',
+  done: '#989898',
+  fail: '#e7000b',
+  idle: '#989898',
+  runText: '#fe6a00',
+  waitText: '#fe6a00',
+  doneText: '#989898',
+  failText: '#e7000b',
   /** What needs you: its title and its notes. */
-  waitTitle: '#fef3c7',
-  waitNote: '#fde68a',
+  waitTitle: '#ede7da',
+  waitNote: '#ff823f',
+  /** Words on an accent fill (the web's `--accent-foreground`). */
+  onAccent: '#020202',
   /** A chip's ground: a question's header, a code span. */
   chip: '#262626',
   /** The pane's own ground as the desktop's dark theme draws it: for mixing only. */
@@ -68,17 +70,17 @@ export function mix(a: string, b: string, t: number): string {
  * the hue's light text), an agent card's edge at rest and under the pointer,
  * its word.
  */
-export type Tone = { hue: string; pillBg: string; pillFg: string; edge: string; hot: string; word: string }
+export type Tone = { hue: string; pillBg: string; pillFg: string; edge: string; hot: string; word: string; /** Its pill is filled with the hue (waiting on you), not outlined in it. */ solid?: true }
 
-const RUN: Tone = { hue: P.run, pillBg: '#172554', pillFg: P.runText, edge: mix(P.run, P.card, 0.5), hot: P.run, word: 'running' }
+const RUN: Tone = { hue: P.run, pillBg: mix(P.run, P.ground, 0.82), pillFg: P.runText, edge: mix(P.run, P.card, 0.5), hot: P.run, word: 'running' }
 
 /** Each status's tone: running and waiting cards carry their hue's edge, a failed one a red edge, the rest grey; every card lights in its hue under the pointer. */
 export const TONE: Readonly<Record<V2Status, Tone>> = {
   running: RUN,
   starting: { ...RUN, word: 'starting' },
-  waiting: { hue: P.wait, pillBg: '#451a03', pillFg: P.waitText, edge: mix(P.wait, P.card, 0.5), hot: P.wait, word: 'waiting' },
-  done: { hue: P.done, pillBg: '#052e16', pillFg: P.doneText, edge: P.border, hot: mix(P.done, P.card, 0.35), word: 'done' },
-  failed: { hue: P.fail, pillBg: '#450a0a', pillFg: P.failText, edge: mix(P.fail, P.card, 0.55), hot: P.fail, word: 'failed' },
+  waiting: { hue: P.wait, pillBg: mix(P.wait, P.ground, 0.82), pillFg: P.waitText, edge: mix(P.wait, P.card, 0.5), hot: P.wait, word: 'waiting', solid: true },
+  done: { hue: P.done, pillBg: '#262626', pillFg: P.doneText, edge: P.border, hot: mix(P.done, P.card, 0.35), word: 'done' },
+  failed: { hue: P.fail, pillBg: mix(P.fail, P.ground, 0.82), pillFg: P.failText, edge: mix(P.fail, P.card, 0.55), hot: P.fail, word: 'failed' },
   idle: { hue: P.idleDot, pillBg: '#262626', pillFg: P.idle, edge: P.border, hot: P.borderStrong, word: 'idle' },
 }
 
@@ -134,19 +136,19 @@ export function pillWidth(word: string): number {
 }
 
 /**
- * A status pill as the web draws it (`.pill`): its word in `hue` lifted
- * toward white, on an 18% wash of the hue, ringed in it at 48%, fully
- * rounded, the word centred. It names no font, so the desktop draws the
- * word in its own.
+ * A status pill in the web's colours (`.pill`, `.status-tag`): its word in
+ * `hue` inside a ring of it, or, `solid` (waiting on you), dark on a fill
+ * of the hue; fully rounded, the word centred. It names no font, so the
+ * desktop draws the word in its own.
  */
-export function pillSvg(word: string, hue: string): string {
+export function pillSvg(word: string, hue: string, solid = false): string {
   const width = pillWidth(word)
   const height = PILL_HEIGHT
-  return memo(`pill|${word}|${hue}`, () =>
+  return memo(`pill|${word}|${hue}|${solid}`, () =>
     [
       `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-      `<rect x=".5" y=".5" width="${width - 1}" height="${height - 1}" rx="${(height - 1) / 2}" fill="${hue}" fill-opacity=".18" stroke="${hue}" stroke-opacity=".48"/>`,
-      `<text x="${width / 2}" y="14" text-anchor="middle" font-size="12" font-weight="500" fill="${mix(hue, '#ffffff', 0.22)}">${esc(word)}</text>`,
+      `<rect x=".5" y=".5" width="${width - 1}" height="${height - 1}" rx="${(height - 1) / 2}" fill="${hue}" fill-opacity="${solid ? 1 : 0}" stroke="${hue}"/>`,
+      `<text x="${width / 2}" y="14" text-anchor="middle" font-size="12" font-weight="500" fill="${solid ? P.onAccent : hue}">${esc(word)}</text>`,
       '</svg>',
     ].join(''),
   )
@@ -157,15 +159,15 @@ export function tagWidth(word: string): number {
   return Math.round(Array.from(word).length * 6.4 + 18)
 }
 
-/** A tag as the web's `.tag-wait` (a file more than one agent edited, "shared"): its word in amber on a 12% amber wash, fully rounded, 20 px high. */
+/** A tag as the web's `.tag-wait` (a file more than one agent edited, "shared"): its word dark on a fill of the accent, fully rounded, 20 px high. */
 export function tagSvg(word: string): string {
   const width = tagWidth(word)
   const height = 20
   return memo(`tag|${word}`, () =>
     [
       `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-      `<rect width="${width}" height="${height}" rx="${height / 2}" fill="${P.wait}" fill-opacity=".12"/>`,
-      `<text x="${width / 2}" y="14" text-anchor="middle" font-size="11" font-weight="500" fill="${P.waitText}">${esc(word)}</text>`,
+      `<rect width="${width}" height="${height}" rx="${height / 2}" fill="${P.wait}"/>`,
+      `<text x="${width / 2}" y="14" text-anchor="middle" font-size="11" font-weight="500" fill="${P.onAccent}">${esc(word)}</text>`,
       '</svg>',
     ].join(''),
   )

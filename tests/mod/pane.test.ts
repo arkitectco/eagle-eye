@@ -138,7 +138,7 @@ test('the Dashboard: the header says the state, your request and model · mode �
     expect(header?.text).toContain(v2.header.line)
     expect(v2.header.line).toBe('opus-5.5 · auto mode · context 41% · ≈$4.12')
     // the permission mode in amber, as Claude Code's footer lights it
-    expect((await ui.findAll({ type: 'Text' })).some(one => one.props.color === '#fbbf24' && one.text === 'auto mode')).toBe(true)
+    expect((await ui.findAll({ type: 'Text' })).some(one => one.props.color === '#fe6a00' && one.text === 'auto mode')).toBe(true)
     // the tabs: 1 Dashboard · 2 Chat · 3 Org · 4 Changes · 5 Inspect · 6 Settings, the Dashboard (`now`) lit; Changes counts git's files
     expect((await ui.find({ key: 'tab:now' }))?.props).toMatchObject({ label: 'Dashboard', hotkey: '1', plain: true, dimColor: false })
     expect((await ui.find({ key: 'tab:chat' }))?.props).toMatchObject({ label: 'Chat', hotkey: '2', dimColor: true })
