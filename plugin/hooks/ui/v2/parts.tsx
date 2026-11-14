@@ -56,13 +56,12 @@ export function glyphCells(kit: Kit, px = 14): number {
   return svgOf(kit) ? cellsForPx(px) : 1
 }
 
-/** A tag as the web's amber `.tag-wait` (a file more than one agent edited, "shared"): an image where Svg draws, else its word on the amber tint. */
+/** A tag as the web's accent `.tag-wait` (a file more than one agent edited, "shared"): an image where Svg draws, else its word dark on the accent. */
 export function tag(kit: Kit, word: string): RenderElement {
   const { Text } = kit
   const Svg = svgOf(kit)
   if (Svg) return <Svg source={tagSvg(word)} alt={word} width={tagWidth(word)} height={20} />
-  const tone = toneOf('waiting')
-  return <Text color={tone.pillFg} backgroundColor={tone.pillBg}>{` ${word} `}</Text>
+  return <Text color={P.onAccent} backgroundColor={P.wait}>{` ${word} `}</Text>
 }
 
 /** The cells `tag` takes. */

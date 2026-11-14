@@ -67,7 +67,7 @@ function demoHeader(kit: Kit, actions: DashActions): RenderElement {
   const top = (
     <Box key="demo:head" flexDirection="row" columnGap={2} alignItems="center">
       <Box flexShrink={0}>
-        <Text bold color={P.waitText} backgroundColor="#451a03">
+        <Text bold color={P.onAccent} backgroundColor={P.wait}>
           {' Sample data '}
         </Text>
       </Box>

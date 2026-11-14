@@ -20,7 +20,7 @@
  *   its junctions (`orgPiecesOf`), each junction a glyph on its own cell and
  *   each stretch of `─` clipped to its cells (the Desktop's box-drawing
  *   glyphs are about 1.17 cells wide). Under the cards, in the hue of what
- *   they lead to: blue to an agent at work, amber to one waiting on you.
+ *   they lead to: the accent to an agent at work or waiting on you.
  * - Bounded: the chart is the pane's width at most and as tall as it needs
  *   (the pane scrolls), and CHART_MOST elements at most, strings counted as
  *   the Desktop counts them. A chart wider than the pane (a tree too broad
@@ -55,12 +55,12 @@ export const CHART_MOST = 1500
 
 /** A card's edge: grey at rest, its status's hue while it runs, waits on you or failed; brighter for the agent whose page was opened last. */
 const EDGE: Readonly<Record<OrgStatus, string>> = { starting: P.run, running: P.run, waiting: P.wait, failed: P.fail, done: P.border, idle: P.border }
-const EDGE_SELECTED: Readonly<Record<OrgStatus, string>> = { starting: '#93c5fd', running: '#93c5fd', waiting: '#fcd34d', failed: '#fca5a5', done: '#d4d4d4', idle: '#d4d4d4' }
+const EDGE_SELECTED: Readonly<Record<OrgStatus, string>> = { starting: '#ff823f', running: '#ff823f', waiting: '#ff823f', failed: '#fca5a5', done: '#d4d4d4', idle: '#d4d4d4' }
 /** Under the pointer: a tint behind the card, and a grey edge lifted. */
 const HOVER_FILL = '#262626'
 
-/** The connectors by heat: dim grey, amber toward an agent waiting on you, blue toward one at work (the web deck's edges). */
-const WIRE: Readonly<Record<OrgHeat, string>> = { 0: '#4a4a4a', 1: '#7a5418', 2: '#2f5aa3' }
+/** The connectors by heat: dim grey, the accent toward an agent waiting on you or at work (the web deck's edges). */
+const WIRE: Readonly<Record<OrgHeat, string>> = { 0: '#4a4a4a', 1: '#ff823f', 2: '#a34a0a' }
 
 /** The statuses whose avatar moves: an Svg in a frame, which the Desktop keeps across redraws. */
 const MOVING: ReadonlySet<OrgStatus> = new Set<OrgStatus>(['starting', 'running', 'waiting'])

@@ -697,7 +697,7 @@ describe('org.client', () => {
     expect(placed(ui.tree, 'k4').node.props.borderColor).toBe('#2a2a2a')
     // the Orchestrator runs: selected, its blue border brighter
     ui.props({ agents: [MAIN, ...team(4)], selected: 'main' })
-    expect(placed(ui.tree, 'main').node.props.borderColor).toBe('#93c5fd')
+    expect(placed(ui.tree, 'main').node.props.borderColor).toBe('#ff823f')
 
     ui.pointer({ type: 'leave', x: 0, y: 0 })
     expect(placed(ui.tree, 'k2').node.props.backgroundColor).toBeUndefined()
@@ -707,8 +707,8 @@ describe('org.client', () => {
     const statuses: OrgStatus[] = ['starting', 'running', 'waiting', 'done', 'failed', 'idle']
     const agents = [MAIN, ...statuses.map(s => agent(s, 'main', s))]
     const ui = mount({ agents, selected: null }, 200, 14)
-    const border = { starting: '#3b82f6', running: '#3b82f6', waiting: '#f59e0b', done: '#2a2a2a', failed: '#ef4444', idle: '#2a2a2a' }
-    const dot = { starting: '#3b82f6', running: '#3b82f6', waiting: '#f59e0b', done: '#22c55e', failed: '#ef4444', idle: '#a8aeb2' }
+    const border = { starting: '#fe6a00', running: '#fe6a00', waiting: '#fe6a00', done: '#2a2a2a', failed: '#e7000b', idle: '#2a2a2a' }
+    const dot = { starting: '#fe6a00', running: '#fe6a00', waiting: '#fe6a00', done: '#989898', failed: '#e7000b', idle: '#989898' }
     for (const s of statuses) {
       const { node } = placed(ui.tree, s)
       expect(node.props, s).toMatchObject({ position: 'absolute', width: CARD_W, height: CARD_H, borderStyle: 'round', borderColor: border[s] })

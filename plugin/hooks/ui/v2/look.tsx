@@ -123,8 +123,8 @@ export function statusPill(kit: Kit, status: string, word = toneOf(status).word)
   const { Text } = kit
   const Svg = svgOf(kit)
   const tone = toneOf(status)
-  if (!Svg) return <Text color={tone.pillFg} backgroundColor={tone.pillBg}>{` ${word} `}</Text>
-  return <Svg source={pillSvg(word, tone.hue)} alt={word} width={pillWidth(word)} height={PILL_HEIGHT} />
+  if (!Svg) return <Text color={tone.solid ? P.onAccent : tone.pillFg} backgroundColor={tone.solid ? tone.hue : tone.pillBg}>{` ${word} `}</Text>
+  return <Svg source={pillSvg(word, tone.hue, tone.solid === true)} alt={word} width={pillWidth(word)} height={PILL_HEIGHT} />
 }
 
 /** What each glyph says to a reader that cannot see it. */

@@ -42,7 +42,7 @@ import type { DashActions, Kit } from '../types'
 import { listBox, listRow } from './dash'
 import { agoText, quoted } from './dashModel'
 import { avatar, avatarCells, quiet, svgOf } from './look'
-import { P, toneOf } from './palette'
+import { P, mix, toneOf } from './palette'
 import { CELL_PX, isRowButton, rule, veil } from './parts'
 import { ago, cellsOf, cutCells, flat, monoAdvance, plural, uiAdvance, type Advance } from './text'
 
@@ -54,8 +54,8 @@ export const MOST_MESSAGES = 12
 
 /** The colours the timeline draws in, the web page's (web/app.css `.tl-*`). */
 export const TL = {
-  call: P.run,
-  think: '#1f3b6e',
+  call: mix(P.ground, P.text, 0.38),
+  think: mix(P.ground, P.text, 0.12),
   wait: P.wait,
   fail: P.fail,
   done: P.done,
@@ -71,16 +71,16 @@ export const TL = {
   you: P.text,
   message: P.fg2,
   pass: '#5a5a5a',
-  background: '#64748b',
+  background: P.muted,
   backgroundEnd: P.idle,
 } as const
 
-/** The terminal's: a call's cells on a deep blue (red failed, amber waiting on you), the tool's name in white over them. */
+/** The terminal's: a call's cells on a warm grey (red failed, the accent's dark waiting on you), the tool's name in white over them. */
 export const TL_CELLS = {
-  call: '#1d4ed8',
+  call: '#6a6863',
   fail: '#991b1b',
   wait: '#b45309',
-  think: '#2f5ea8',
+  think: '#403f3d',
   idle: P.muted2,
   fold: '#5a5a5a',
   mark: P.text,

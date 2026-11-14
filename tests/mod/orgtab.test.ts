@@ -190,7 +190,7 @@ test('the agent whose page was opened last is marked on the chart; where the pan
   await press(ui, 'key:b')
   expect((await ui.find({ key: 'tab:org' }))?.props.dimColor).toBe(false)
   // the brighter amber of the one marked
-  expect((await ui.find({ key: `org:card:${IDS.builder}` }))?.props.borderColor).toBe('#fcd34d')
+  expect((await ui.find({ key: `org:card:${IDS.builder}` }))?.props.borderColor).toBe('#ff823f')
   await press(ui, 'tab:now')
   await ui.unmount()
 

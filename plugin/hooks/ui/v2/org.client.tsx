@@ -56,30 +56,30 @@ import {
 
 /** The status dot: the web deck's status hues. */
 const DOT: Record<OrgStatus, string> = {
-  starting: '#3b82f6',
-  running: '#3b82f6',
-  waiting: '#f59e0b',
-  done: '#22c55e',
-  failed: '#ef4444',
-  idle: '#a8aeb2',
+  starting: '#fe6a00',
+  running: '#fe6a00',
+  waiting: '#fe6a00',
+  done: '#989898',
+  failed: '#e7000b',
+  idle: '#989898',
 }
 
 /** A card's border: grey, or its status hue while it runs, waits on you, or once it failed. */
 const GREY = '#2a2a2a'
 const BORDER: Record<OrgStatus, string> = {
-  starting: '#3b82f6',
-  running: '#3b82f6',
-  waiting: '#f59e0b',
-  failed: '#ef4444',
+  starting: '#fe6a00',
+  running: '#fe6a00',
+  waiting: '#fe6a00',
+  failed: '#e7000b',
   done: GREY,
   idle: GREY,
 }
 
 /** The selected card's border: the same hue, brighter. */
 const BORDER_SELECTED: Record<OrgStatus, string> = {
-  starting: '#93c5fd',
-  running: '#93c5fd',
-  waiting: '#fcd34d',
+  starting: '#ff823f',
+  running: '#ff823f',
+  waiting: '#ff823f',
   failed: '#fca5a5',
   done: '#d4d4d4',
   idle: '#d4d4d4',
@@ -89,8 +89,8 @@ const BORDER_SELECTED: Record<OrgStatus, string> = {
 const HOVER_FILL = '#262626'
 const HOVER_BORDER = '#525252'
 
-/** The connectors by heat: dim grey, amber toward an agent waiting on you, blue toward a running one (the web deck's edges). */
-const WIRE: Record<OrgHeat, string> = { 0: '#4a4a4a', 1: '#7a5418', 2: '#2f5aa3' }
+/** The connectors by heat: dim grey, the accent toward an agent waiting on you or running (the web deck's edges). */
+const WIRE: Record<OrgHeat, string> = { 0: '#4a4a4a', 1: '#ff823f', 2: '#a34a0a' }
 
 /** What an arrow key pans by, and with shift: a card and its gap. */
 const STEP_X = 6
