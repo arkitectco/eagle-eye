@@ -413,10 +413,16 @@ function commandOf(value) {
   return null
 }
 
+/** Whether the request's Origin is this server's own page: plain http and this server's host and port, nothing else. */
+function isOwnOrigin(req, host) {
+  const origin = (req.headers.origin ?? '').toLowerCase()
+  return origin.startsWith('http://') && origin.slice('http://'.length) === host
+}
+
 /** POST /cmd: only the page itself may send one (a handle in its header, which no other site can set, and its own Origin); printed with the handle's grade. */
 function command(req, res, host) {
   const grade = gradeOf(req.headers['x-deck-handle'])
-  if (grade === null || (req.headers.origin ?? '').toLowerCase() !== `http://${host}`) {
+  if (grade === null || !isOwnOrigin(req, host)) {
     return send(res, 403, '{"ok":false,"error":"forbidden"}', JSON_TYPE)
   }
   const tooBig = () => { send(res, 413, '{"ok":false,"error":"too large"}', JSON_TYPE); req.resume() }
@@ -449,7 +455,7 @@ function command(req, res, host) {
  */
 function session(req, res, host) {
   req.resume() // a body says nothing here
-  if ((req.headers.origin ?? '').toLowerCase() !== `http://${host}`) return send(res, 403, '{"ok":false,"error":"forbidden"}', JSON_TYPE)
+  if (!isOwnOrigin(req, host)) return send(res, 403, '{"ok":false,"error":"forbidden"}', JSON_TYPE)
   const ticket = ticketOf(req.headers['x-deck-ticket'])
   if (ticket === null) return send(res, 403, '{"ok":false,"error":"unknown"}', JSON_TYPE)
   if (used.has(ticket.nonce) || used.size >= MAX_USED) return send(res, 403, '{"ok":false,"error":"used"}', JSON_TYPE)

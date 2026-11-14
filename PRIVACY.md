@@ -34,7 +34,7 @@ For Changes it runs read-only git commands (`config --list`, `rev-parse`, `statu
 
 ### Node.js
 
-`node web/home.js` makes Eagle Eye's folders and files private and removes what a session no longer needs. Short `node` one-liners read the session's process id, check whether other listed sessions' processes still run, and delete registry and inbox files the mod made. None of them runs through a shell.
+`node web/home.js` makes Eagle Eye's folders and files private and removes what a session no longer needs. Three scripts of a few lines each do the rest: `node web/pid.js` reads the session's process id, `node web/alive.js` checks whether other listed sessions' processes still run, and `node web/remove.js` deletes registry and inbox files the mod made. None of them runs through a shell, and the mod runs no inline script.
 
 ### Its files
 

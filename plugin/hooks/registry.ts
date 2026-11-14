@@ -67,7 +67,10 @@ export type RegistryHost = {
   storeGet: (key: string) => Promise<unknown>
   storeSet: (key: string, value: unknown) => Promise<void>
   /** Runs node with `args` (no shell); its exit code and what it printed. */
-  node: (args: readonly string[]) => Promise<{ exitCode: number; stdout: string }>
+  /** `node web/alive.js <pids>`: prints the ones the system still runs. */
+  alive: (pids: readonly string[]) => Promise<{ exitCode: number; stdout: string }>
+  /** `node web/remove.js <paths>`: removes those files. */
+  remove: (paths: readonly string[]) => Promise<{ exitCode: number; stdout: string }>
   every: (ms: number, fn: () => void) => Timer
   after: (ms: number, fn: () => void) => Timer
   /** The surfaces the session draws on (`$.session.surfaces()`). */
@@ -446,10 +449,9 @@ async function readRegistry(now: number): Promise<void> {
 
 /** The processes among `pids` the system still runs (one node call); null when node cannot say. */
 async function alivePids(pids: readonly number[]): Promise<Set<number> | null> {
-  const script = 'for (const p of process.argv.slice(1)) { try { process.kill(Number(p), 0); console.log(p) } catch (e) { if (e.code === "EPERM") console.log(p) } }'
   try {
-    // `--` so a value that begins with `-` is a positional argument, never read as a node option
-    const ran = await io().node(['-e', script, '--', ...pids.map(String)])
+    // web/alive.js: what follows a script's path is the script's own, never read as a node option
+    const ran = await io().alive(pids.map(String))
     if (ran.exitCode !== 0) return null
     return new Set(ran.stdout.split(/\s+/).filter(one => /^\d+$/.test(one)).map(Number))
   } catch {
@@ -460,10 +462,9 @@ async function alivePids(pids: readonly number[]): Promise<Set<number> | null> {
 /** Removes files the deck made (its registry's, its inbox's), by their paths (one node call: the engine's files write but never remove). */
 async function removeFiles(paths: readonly string[]): Promise<void> {
   if (paths.length === 0) return
-  const script = 'for (const p of process.argv.slice(1)) { try { require("fs").rmSync(p, { force: true }) } catch {} }'
   try {
-    // `--` so a path that begins with `-` is a positional argument, never read as a node option
-    await io().node(['-e', script, '--', ...paths])
+    // web/remove.js: what follows a script's path is the script's own, never read as a node option
+    await io().remove(paths)
   } catch {
     // left for the next deck's clean
   }
