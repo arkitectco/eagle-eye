@@ -190,33 +190,33 @@ function demoShown(): W.WebStateV2 | null {
  * tidying: nothing in Claude Code changes. Kept in the view, so a reload
  * keeps it. Answers what it did, in words, and acks `ackId`.
  */
-async function clearFinished($: EngineInterface, ackId = ''): Promise<string> {
+async function clearFinishedAgents($: EngineInterface, ackId = ''): Promise<string> {
   const now = await $.clock.now()
   const state = shownV2Of(now)
   const ids = state ? W.finishedIdsOf(state) : []
   if (ids.length === 0) {
-    await ack($, ackId, 'failed', 'Nothing finished to clear')
+    await ackPage($, ackId, 'failed', 'Nothing finished to clear')
     return 'Nothing finished to clear.'
   }
   view.v2 = M.clearedWith(view.v2, ids, now)
-  changed($)
+  deckChanged($)
   const said = `Cleared ${ids.length} finished ${ids.length === 1 ? 'agent' : 'agents'} from the deck`
-  await ack($, ackId, 'delivered', said)
+  await ackPage($, ackId, 'delivered', said)
   return `${said} (Claude Code keeps them). /eagle-eye clear show brings them back.`
 }
 
 /** "Show N cleared": the agents "Clear finished" hid shown again everywhere; acks `ackId`. */
-async function showCleared($: EngineInterface, ackId = ''): Promise<string> {
+async function showClearedAgents($: EngineInterface, ackId = ''): Promise<string> {
   const now = await $.clock.now()
   const count = shownV2Of(now)?.cleared?.count ?? 0
   if (view.v2.cleared.length === 0) {
-    await ack($, ackId, 'failed', 'Nothing cleared to show')
+    await ackPage($, ackId, 'failed', 'Nothing cleared to show')
     return 'Nothing cleared to show.'
   }
   view.v2 = M.view2With(view.v2, { cleared: [], clearedAt: 0 })
-  changed($)
+  deckChanged($)
   const said = count > 0 ? `Showing ${count} cleared ${count === 1 ? 'agent' : 'agents'} again` : 'Showing the cleared agents again'
-  await ack($, ackId, 'delivered', said)
+  await ackPage($, ackId, 'delivered', said)
   return `${said}.`
 }
 
@@ -251,7 +251,7 @@ function isOrgDownOn(surface: RenderSurface): boolean {
 let lastAgent: string | null = null
 
 /** Draws every site of this plugin again; the engine folds calls to ten a second. Events that change the data call it. */
-function redraw($: EngineInterface) {
+function redrawDeck($: EngineInterface) {
   drawn.clear()
   $.ui.invalidate('ui.render')
 }
@@ -336,7 +336,7 @@ function redrawIfChanged($: EngineInterface, now: number) {
   shownKey = key
   scheduleWeb($)
   SR.noteChanged(now)
-  redraw($)
+  redrawDeck($)
 }
 
 /** What Claude Code showed of a step's thinking as it streamed, read from its chunks: their text, and the block the last came in. */
@@ -723,19 +723,19 @@ function debugStateOf(now: number) {
 function runCommand($: EngineInterface, cmd: Record<string, unknown>) {
   const ackId = W.cmdIdOf(cmd)
   const route = W.routeOf(cmd, data)
-  if (route === null) void ack($, ackId, 'failed', W.refusalOf(cmd, data))
-  else if (route.kind === 'chat') void sendChat($, route.agentId, route.text, ackId)
+  if (route === null) void ackPage($, ackId, 'failed', W.refusalOf(cmd, data))
+  else if (route.kind === 'chat') void sendChatMessage($, route.agentId, route.text, ackId)
   else if (route.kind === 'review') void sendReview($, route.text, ackId)
   else if (route.kind === 'answer') answerCall($, route.callId, route.answers, ackId)
   // Stop, Stop turn and Cancel: only through Claude Code's own channels (TaskStop, CronDelete, $.turn.abort)
-  else if (route.kind === 'stopAgent') void stopAgent($, route.agentId, ackId)
-  else if (route.kind === 'abortTurn') void abortTurn($, route.turnId, ackId)
-  else if (route.kind === 'stopBackground') void stopBackground($, route.bgId, ackId)
+  else if (route.kind === 'stopAgent') void stopAgentRun($, route.agentId, ackId)
+  else if (route.kind === 'abortTurn') void abortMainTurn($, route.turnId, ackId)
+  else if (route.kind === 'stopBackground') void stopBackgroundTask($, route.bgId, ackId)
   else if (route.kind === 'avatarStyle') {
-    setAvatarStyle($, route.style)
-    void ack($, ackId, 'delivered', `Avatars: ${AV.styleName(route.style)}`)
-  } else if (route.kind === 'clearFinished') void clearFinished($, ackId)
-  else if (route.kind === 'showCleared') void showCleared($, ackId)
+    applyAvatarStyle($, route.style)
+    void ackPage($, ackId, 'delivered', `Avatars: ${AV.styleName(route.style)}`)
+  } else if (route.kind === 'clearFinished') void clearFinishedAgents($, ackId)
+  else if (route.kind === 'showCleared') void showClearedAgents($, ackId)
   else if (route.kind === 'selectRepo') void repoFromPage($, route.root, ackId)
 }
 
@@ -747,11 +747,11 @@ function runCommand($: EngineInterface, cmd: Record<string, unknown>) {
 async function repoFromPage($: EngineInterface, root: string, ackId: string): Promise<void> {
   const offered = [...currentGit().nearby, ...currentGit().repos].find(one => R.sameRoot(one.root, root))
   if (root !== '' && !offered) {
-    void ack($, ackId, 'failed', 'Not a repository Changes offers here')
+    void ackPage($, ackId, 'failed', 'Not a repository Changes offers here')
     return
   }
   const why = await chooseRepo($, offered?.root ?? '')
-  void ack($, ackId, why === '' ? 'delivered' : 'failed', why || (offered ? `Changes shows ${offered.name}` : 'Changes follows the work again'))
+  void ackPage($, ackId, why === '' ? 'delivered' : 'failed', why || (offered ? `Changes shows ${offered.name}` : 'Changes follows the work again'))
 }
 
 /** Keeps the person's own settings in the store (`prefs`), for every session: the band hidden or not, and the avatar style. */
@@ -765,16 +765,16 @@ function savePrefs($: EngineInterface) {
  * session; the pane draws again, and the web page follows with the state it
  * is written next (its `avatarStyle`).
  */
-function setAvatarStyle($: EngineInterface, style: string) {
+function applyAvatarStyle($: EngineInterface, style: string) {
   if (!AV.isStyle(style) || style === view.avatarStyle) return
   view.avatarStyle = style
   savePrefs($)
-  changed($)
+  deckChanged($)
 }
 
 
 /** Says what came of the page's command `id` in the state it reads (`acks`); a command with no id is told nothing. */
-async function ack($: EngineInterface, id: string, status: DeckAck['status'], text: string): Promise<void> {
+async function ackPage($: EngineInterface, id: string, status: DeckAck['status'], text: string): Promise<void> {
   if (id === '') return
   try {
     const now = await $.clock.now()
@@ -872,7 +872,7 @@ async function runStop($: EngineInterface, call: B.StopCall): Promise<string> {
 /** A stop the deck could not make: the page's command and a toast say why. */
 async function stopFailed($: EngineInterface, ackId: string, why: string): Promise<void> {
   $.ui.toast(why)
-  await ack($, ackId, 'failed', why)
+  await ackPage($, ackId, 'failed', why)
 }
 
 /**
@@ -880,7 +880,7 @@ async function stopFailed($: EngineInterface, ackId: string, why: string): Promi
  * TaskStop of it (`runStop`). Then its row ends as stopped, Chat says "You
  * stopped builder", and the page's command is told.
  */
-async function stopAgent($: EngineInterface, agentId: string, ackId = ''): Promise<void> {
+async function stopAgentRun($: EngineInterface, agentId: string, ackId = ''): Promise<void> {
   const agent = M.agentOf(data, agentId)
   if (!agent || !B.isStoppableAgent(agent)) return stopFailed($, ackId, W.refusalOf({ cmd: 'stopAgent', agentId }, data))
   const name = W.rowTitleOf(agent)
@@ -895,7 +895,7 @@ async function stopAgent($: EngineInterface, agentId: string, ackId = ''): Promi
   }
   M.addMessage(data, { from: M.YOU, to: agent.id, kind: 'stop', text: `You stopped ${name}`, at: now, ...(ackId ? { ackId } : {}) })
   $.ui.toast(`Stopped ${name}`)
-  await ack($, ackId, 'delivered', `Stopped ${name}`)
+  await ackPage($, ackId, 'delivered', `Stopped ${name}`)
   touched($, now)
 }
 
@@ -904,7 +904,7 @@ async function stopAgent($: EngineInterface, agentId: string, ackId = ''): Promi
  * turn, as Esc does (an op: no permission is asked or granted); the
  * foreground agents end with it. Then Chat says "You stopped the turn".
  */
-async function abortTurn($: EngineInterface, turnId: string, ackId = ''): Promise<void> {
+async function abortMainTurn($: EngineInterface, turnId: string, ackId = ''): Promise<void> {
   if (turnId === '' || data.mainTurnId !== turnId) return stopFailed($, ackId, data.mainTurnId === undefined ? 'No turn is running' : 'That turn has ended')
   try {
     await $.turn.abort({ turnId })
@@ -914,7 +914,7 @@ async function abortTurn($: EngineInterface, turnId: string, ackId = ''): Promis
   const now = await $.clock.now()
   M.addMessage(data, { from: M.YOU, to: M.MAIN, kind: 'stop', text: 'You stopped the turn', at: now, ...(ackId ? { ackId } : {}) })
   $.ui.toast('Stopped the turn')
-  await ack($, ackId, 'delivered', 'Stopped the turn')
+  await ackPage($, ackId, 'delivered', 'Stopped the turn')
   touched($, now)
 }
 
@@ -924,7 +924,7 @@ async function abortTurn($: EngineInterface, turnId: string, ackId = ''): Promis
  * `bgId` (`runStop`). Then its row goes, Chat says "You stopped npm run
  * dev" or "You cancelled …", and the page's command is told.
  */
-async function stopBackground($: EngineInterface, bgId: string, ackId = ''): Promise<void> {
+async function stopBackgroundTask($: EngineInterface, bgId: string, ackId = ''): Promise<void> {
   const row = B.rowByBgId(data, bgId)
   if (!row) return stopFailed($, ackId, W.refusalOf({ cmd: 'stopBackground', bgId }, data))
   const call = B.stopCallOfRow(row)
@@ -937,7 +937,7 @@ async function stopBackground($: EngineInterface, bgId: string, ackId = ''): Pro
   const said = `You ${call.tool === 'CronDelete' ? 'cancelled' : 'stopped'} ${name}`
   M.addMessage(data, { from: M.YOU, to: '', kind: 'stop', text: said, at: now, ...(by ? { agent: by } : {}), ...(ackId ? { ackId } : {}) })
   $.ui.toast(said.replace(/^You s/, 'S').replace(/^You c/, 'C'))
-  await ack($, ackId, 'delivered', said.replace(/^You s/, 'S').replace(/^You c/, 'C'))
+  await ackPage($, ackId, 'delivered', said.replace(/^You s/, 'S').replace(/^You c/, 'C'))
   touched($, now)
 }
 
@@ -986,14 +986,14 @@ async function sendReview($: EngineInterface, text: string, ackId: string): Prom
   const said = W.reviewStepOf(filled)
   if (said.kind === 'filled') {
     $.ui.toast('The review request is in your prompt; press Enter to send it.')
-    await ack($, ackId, 'delivered', 'In your prompt box: press Enter to send it')
+    await ackPage($, ackId, 'delivered', 'In your prompt box: press Enter to send it')
   } else if (said.kind === 'queue') {
     const isBusy = M.agentOf(data, M.MAIN)?.status === 'running'
     await queueForMain($, text, ackId, { status: 'queued', text: isBusy ? 'Claude reviews it when it finishes its current turn' : 'Claude reviews it now' })
     $.ui.toast(isBusy ? 'Review queued: Claude reviews the changes when it finishes its current turn.' : 'Review sent: Claude reviews the changes now.')
   } else {
     $.ui.toast('Could not fill the prompt.')
-    await ack($, ackId, 'failed', said.why)
+    await ackPage($, ackId, 'failed', said.why)
   }
 }
 
@@ -1019,7 +1019,7 @@ async function queueForMain($: EngineInterface, text: string, ackId: string, tol
   const entry = { text: said, isSubmitted: false }
   deckPrompts.push(entry)
   if (deckPrompts.length > 20) deckPrompts.splice(0, deckPrompts.length - 20)
-  await ack($, ackId, told.status, told.text)
+  await ackPage($, ackId, told.status, told.text)
   touched($, now)
   const forget = () => {
     const at = deckPrompts.indexOf(entry)
@@ -1029,13 +1029,13 @@ async function queueForMain($: EngineInterface, text: string, ackId: string, tol
     result => {
       if (result.drop === undefined) return
       forget()
-      void ack($, ackId, 'failed', `Not sent: ${F.trunc(F.oneLine(result.drop), 200)}`)
+      void ackPage($, ackId, 'failed', `Not sent: ${F.trunc(F.oneLine(result.drop), 200)}`)
     },
     error => {
       forget()
       const why = error instanceof Error ? error.message : String(error)
       $.ui.toast(`Could not queue the prompt: ${why}`)
-      void ack($, ackId, 'failed', `Could not queue it: ${F.trunc(F.oneLine(why), 200)}`)
+      void ackPage($, ackId, 'failed', `Could not queue it: ${F.trunc(F.oneLine(why), 200)}`)
     },
   )
 }
@@ -1091,11 +1091,11 @@ const replies = new Map<string, { since: number; isRead: boolean }>()
  * it at its next step, and a finished one is woken by it. Its ack says which;
  * the agent's reply, its next words, is logged when it comes (`turn.step`).
  */
-async function sendChat($: EngineInterface, agentId: string, text: string, ackId = ''): Promise<void> {
+async function sendChatMessage($: EngineInterface, agentId: string, text: string, ackId = ''): Promise<void> {
   const agent = M.agentOf(data, agentId)
   const now = await $.clock.now()
   if (!agent) {
-    await ack($, ackId, 'failed', 'No such agent in this session')
+    await ackPage($, ackId, 'failed', 'No such agent in this session')
     return
   }
 
@@ -1104,7 +1104,7 @@ async function sendChat($: EngineInterface, agentId: string, text: string, ackId
     // busy, it reads them once its turn ends; idle, at once
     await queueForMain($, text, ackId, isBusy ? { status: 'queued', text: 'Claude reads it when it finishes its current turn' } : { status: 'delivered', text: 'Claude reads it now' })
     $.ui.toast(isBusy ? 'Queued for the Orchestrator: it reads it when its current turn ends.' : 'Sent to the Orchestrator.')
-    redraw($)
+    redrawDeck($)
     return
   }
 
@@ -1114,17 +1114,17 @@ async function sendChat($: EngineInterface, agentId: string, text: string, ackId
     $.ui.toast(`Sent to ${W.rowTitleOf(agent)}`)
     if (M.isEnded(agent.status)) M.reopen(agent, now)
     replies.set(agentId, { since: now, isRead: false })
-    await ack($, ackId, 'delivered', 'It reads it at its next step')
+    await ackPage($, ackId, 'delivered', 'It reads it at its next step')
   } else if (isAutoModeRefusal(sent.reason)) {
     // auto mode takes no send from the deck: the Orchestrator passes your words on, and they stay in this agent's Talk
     await relayViaMain($, agent, text, ackId, message)
   } else {
     const why = undeliveredOf(sent.reason)
     $.ui.toast(why)
-    await ack($, ackId, 'failed', why)
+    await ackPage($, ackId, 'failed', why)
   }
   saveDeckState($)
-  redraw($)
+  redrawDeck($)
 }
 
 /** What a refused send to a subagent says in auto mode, where Claude Code's classifier judges the deck's sends. */
@@ -1187,14 +1187,14 @@ async function relayViaMain($: EngineInterface, agent: DeckAgent, text: string, 
   const relay: Relay = { agentId: agent.id, label, text, ackId, message, prompt, isSubmitted: false, turnId: '', isPassed: false, isRead: false }
   relays.push(relay)
   if (relays.length > 20) relays.splice(0, relays.length - 20)
-  await ack($, ackId, 'queued', 'Waiting for the Orchestrator to pass it on')
+  await ackPage($, ackId, 'queued', 'Waiting for the Orchestrator to pass it on')
   $.ui.toast(`Auto mode: the Orchestrator will pass your message on to ${label}.`)
   // the Orchestrator could not be asked either (a hook dropped the prompt): auto mode's refusal stands, in words for you
   const refuse = () => {
     const at = relays.indexOf(relay)
     if (at >= 0) relays.splice(at, 1)
     $.ui.toast(AUTO_MODE_REFUSAL)
-    void ack($, ackId, 'failed', AUTO_MODE_REFUSAL)
+    void ackPage($, ackId, 'failed', AUTO_MODE_REFUSAL)
   }
   void $.prompt.submit({ text: prompt, asUser: true }).then(
     result => {
@@ -1241,7 +1241,7 @@ async function relayPassed($: EngineInterface, relay: Relay, now: number): Promi
   if (agent && M.isEnded(agent.status)) M.reopen(agent, now)
   replies.set(relay.agentId, { since: now, isRead: false })
   $.ui.toast(`Passed on to ${relay.label} by the Orchestrator.`)
-  await ack($, relay.ackId, 'delivered', 'Passed on by the Orchestrator')
+  await ackPage($, relay.ackId, 'delivered', 'Passed on by the Orchestrator')
 }
 
 /** Whether what agent `to` received is your message the Orchestrator passed on (logged already, as yours): marked read, so it matches once. */
@@ -1264,7 +1264,7 @@ function endRelay($: EngineInterface, turnId: string, answer: string): boolean {
     relays.splice(relays.indexOf(relay), 1)
     const first = firstSentenceOf(answer)
     $.ui.toast(`The Orchestrator didn't pass your message on to ${relay.label}.`)
-    void ack($, relay.ackId, 'failed', first ? `The Orchestrator didn't pass it on. ${first}` : "The Orchestrator didn't pass it on")
+    void ackPage($, relay.ackId, 'failed', first ? `The Orchestrator didn't pass it on. ${first}` : "The Orchestrator didn't pass it on")
   }
   return ended.length > 0
 }
@@ -1388,7 +1388,7 @@ async function recoverLost($: EngineInterface): Promise<void> {
         // that agent stays without a result
       }
     }
-    if (isChanged) changed($)
+    if (isChanged) deckChanged($)
   } catch {
     // recovery is a nicety: the deck goes on as it was
   } finally {
@@ -1402,7 +1402,7 @@ async function recoverLost($: EngineInterface): Promise<void> {
  * pane's history too). It draws only when the screen would change
  * (`redrawIfChanged`, the web deck's signal as well); events draw for themselves.
  */
-async function tick($: EngineInterface): Promise<void> {
+async function deckTick($: EngineInterface): Promise<void> {
   await checkDebug($)
   const now = await $.clock.now()
   // workflow agents and housekeeping loops fold away: they keep nothing on screen live
@@ -1454,9 +1454,9 @@ async function openPane($: EngineInterface): Promise<boolean> {
   return opened.isPlaced
 }
 
-function changed($: EngineInterface) {
+function deckChanged($: EngineInterface) {
   saveDeckState($)
-  redraw($)
+  redrawDeck($)
 }
 
 /** How long a scroll waits for the drawing a press asked for: the engine folds redraws to ten a second. */
@@ -1606,7 +1606,7 @@ async function readMessage($: EngineInterface, id: string, onRead: (text: string
   } catch {
     // the pane goes on without it
   }
-  redraw($)
+  redrawDeck($)
 }
 
 /**
@@ -1632,7 +1632,7 @@ function shownV2Of(now: number): W.WebStateV2 | null {
 }
 
 /** The ring a row down (1) or up (-1) among `keys`, else among the rows the v2 screen draws (`W.focusKeysOf`); held at either end. Chat and an agent's page move it onto their composer this way; no key is bound to it. */
-async function focusNext($: EngineInterface, dir: 1 | -1, keys?: readonly string[]): Promise<void> {
+async function moveFocusNext($: EngineInterface, dir: 1 | -1, keys?: readonly string[]): Promise<void> {
   const state = keys ? null : shownV2Of(await $.clock.now())
   const rows = keys ?? (state ? W.focusKeysOf(state, view.v2, view.page) : [])
   const key = W.focusStepOf(rows, paneFocus, dir)
@@ -1640,7 +1640,7 @@ async function focusNext($: EngineInterface, dir: 1 | -1, keys?: readonly string
 }
 
 /** Now (off an agent's page and Inspect): the ring on the next thing that needs you, after the one it is on, round to the first. No key is bound to it. */
-async function focusNeed($: EngineInterface): Promise<void> {
+async function moveFocusToNeed($: EngineInterface): Promise<void> {
   const state = shownV2Of(await $.clock.now())
   const key = state ? W.nextNeedKeyOf(state, paneFocus) : ''
   if (key === '') {
@@ -1650,7 +1650,7 @@ async function focusNeed($: EngineInterface): Promise<void> {
   if (view.v2.tab !== 'now' || view.page !== '') {
     view.page = ''
     view.v2 = M.view2With(view.v2, { tab: 'now' })
-    changed($)
+    deckChanged($)
   }
   await focusOn($, key)
 }
@@ -1661,26 +1661,26 @@ function actionsFor($: EngineInterface): DeckActions {
     openAgent: id => {
       view.page = id
       lastAgent = id
-      changed($)
+      deckChanged($)
     },
     back: () => {
       view.page = ''
-      changed($)
+      deckChanged($)
     },
     // Now's sections fold to their heads, and the choice stays (the view's `collapsed`)
     toggleSection: id => {
       view.collapsed = M.collapsedWith(view.collapsed, id)
-      changed($)
+      deckChanged($)
     },
     answer: (callId, answers) => (view.isDemo ? void answerInSample($, callId, answers) : answerFromPane($, callId, answers)),
-    redraw: () => redraw($),
+    redraw: () => redrawDeck($),
     loadMessage: (id, onRead) => void readMessage($, id, onRead),
     reveal: (key, block) => scrollTo($, key, block),
     exitDemo: () => {
       SR.showHere()
       leaveDemo()
       view.page = ''
-      changed($)
+      deckChanged($)
     },
     // the v2 screens' own state: each field checked as a reload checks it; Changes reads the file it shows again
     setV2View: patch => {
@@ -1690,38 +1690,38 @@ function actionsFor($: EngineInterface): DeckActions {
       if (patch.tab === 'chat' || (patch.chatFilter !== undefined && patch.chatFilter !== view.v2.chatFilter)) chatFollow.isShown = false
       view.v2 = M.view2With(view.v2, patch)
       if (view.v2.tab === 'changes' && view.file && currentGit().isRepo) void loadFileDiff($, view.file)
-      changed($)
+      deckChanged($)
     },
     // j and k: the focus a row down or up; n: the next thing that needs you
-    focusNext: (dir, keys) => void focusNext($, dir, keys),
-    focusNeed: () => void focusNeed($),
+    focusNext: (dir, keys) => void moveFocusNext($, dir, keys),
+    focusNeed: () => void moveFocusToNeed($),
     // Changes' picks and Follow the work: the repository it shows pinned, or let follow the work again; the sample's are a recording
     selectRepo: root => (view.isDemo ? $.ui.toast('Sample data: Changes shows the sample’s repository. Back to this chat to pick one of yours.') : void chooseRepo($, root).then(why => why && $.ui.toast(why))),
     selectFile: path => {
       view.file = view.file === path ? '' : path
       closeFileDiff()
       if (view.file && currentGit().isRepo) void loadFileDiff($, path)
-      changed($)
+      deckChanged($)
     },
     selectCommit: hash => {
       view.commit = view.commit === hash ? '' : hash
       closeCommit()
       if (view.commit) void loadCommit($, hash)
-      changed($)
+      deckChanged($)
     },
     toggleBand: () => {
       view.isBandHidden = !view.isBandHidden
       savePrefs($)
-      changed($)
+      deckChanged($)
     },
-    setAvatarStyle: style => setAvatarStyle($, style),
+    setAvatarStyle: style => applyAvatarStyle($, style),
     // the deck's own tidying, nothing in Claude Code: finished agents hidden, or shown again
-    clearFinished: () => void clearFinished($),
-    showCleared: () => void showCleared($),
+    clearFinished: () => void clearFinishedAgents($),
+    showCleared: () => void showClearedAgents($),
     // Stop, Stop turn and Cancel: Claude Code's own TaskStop, $.turn.abort and CronDelete; the sample stops nothing
-    stopAgent: id => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your agents.') : void stopAgent($, id)),
-    abortTurn: () => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your turn.') : void abortTurn($, data.mainTurnId ?? '')),
-    stopBackground: id => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your background work.') : void stopBackground($, id)),
+    stopAgent: id => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your agents.') : void stopAgentRun($, id)),
+    abortTurn: () => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your turn.') : void abortMainTurn($, data.mainTurnId ?? '')),
+    stopBackground: id => (view.isDemo ? $.ui.toast('Sample data: nothing is stopped. Back to this chat to stop your background work.') : void stopBackgroundTask($, id)),
 
     // the sample's chat sends nothing: its agents are a recording, and its Orchestrator is not this session's
     // a send from the pane's composer carries an id: its ack says what came of it, under the message; Chat keeps to its end, where it shows
@@ -1731,7 +1731,7 @@ function actionsFor($: EngineInterface): DeckActions {
         return
       }
       chatFollow.isAtEnd = true
-      void sendChat($, agentId, text, W.cmdIdOf({ id: ackId }))
+      void sendChatMessage($, agentId, text, W.cmdIdOf({ id: ackId }))
     },
     review: text => fillReview($, text),
     // every session on this machine (./registry): the list dropped over the tabs (`s`), and any session's deck shown in this one's place (here's again: this deck's own)
@@ -1744,14 +1744,14 @@ function actionsFor($: EngineInterface): DeckActions {
       leaveDemo()
       view.v2 = M.view2With(view.v2, { tab })
       view.page = ''
-      changed($)
+      deckChanged($)
       void openPane($)
     },
     openBrowser: () => void openOwnBrowser($),
     // the band's rows of what the Browser pane's page sent in your voice (./hold): your Send runs it, Discard drops it, More shows it whole
-    sendHeld: key => sendHeld($, key),
-    discardHeld: key => discardHeld($, key),
-    toggleHeld: key => toggleHeld($, key),
+    sendHeld: key => sendHeldMessage($, key),
+    discardHeld: key => discardHeldMessage($, key),
+    toggleHeld: key => toggleHeldMessage($, key),
   }
 }
 
@@ -1803,7 +1803,7 @@ async function openFromChart($: EngineInterface, posted: unknown): Promise<void>
   if (!state?.agents.some(row => row.row === 'agent' && row.id === id)) return
   view.page = id
   lastAgent = id
-  changed($)
+  deckChanged($)
 }
 
 /** Leaves the sample: the pane shows this session again. */
@@ -1873,7 +1873,7 @@ async function loadDemo($: EngineInterface, isFresh: boolean): Promise<string> {
   demo.v2Files = W.v2FilesFrom({ agents: {}, patches: {}, messages: {} })
   demo.note = ''
   demo.version += 1
-  redraw($)
+  redrawDeck($)
   const readAt = await $.clock.now()
   let shown: W.WebStateV2 | null = null
   let files: W.V2Files | null = null
@@ -1891,7 +1891,7 @@ async function loadDemo($: EngineInterface, isFresh: boolean): Promise<string> {
   if (!shown) {
     demo.note = 'The sample could not be read: web/fixtures/state.v2.json is missing, or not a deck state.'
     demo.version += 1
-    redraw($)
+    redrawDeck($)
     return demo.note
   }
   const isPage = (id: string) => shown?.agents.some(row => row.row === 'agent' && row.id === id) === true
@@ -1899,7 +1899,7 @@ async function loadDemo($: EngineInterface, isFresh: boolean): Promise<string> {
   if (files) demo.v2Files = files
   if (view.page !== '' && !isPage(view.page)) view.page = ''
   demo.version += 1
-  changed($)
+  deckChanged($)
   return ''
 }
 
@@ -1964,8 +1964,8 @@ function registryHost($: EngineInterface): SR.RegistryHost {
     pidOf: () => sessionPidOf($),
     steer: cmd => steerFromSession($, cmd),
     hasAck: id => data.acks.some(one => one.id === id),
-    ack: (id, status, text) => void ack($, id, status, text),
-    changed: () => changed($),
+    ack: (id, status, text) => void ackPage($, id, status, text),
+    changed: () => deckChanged($),
     refresh: now => redrawIfChanged($, now),
     // a deck views this session: its folder written from now, as for /eagle-eye web
     share: () => shareWeb($),
@@ -1984,7 +1984,7 @@ function registryHost($: EngineInterface): SR.RegistryHost {
 function steerFromSession($: EngineInterface, cmd: Record<string, unknown>) {
   const said = SE.steeringCmdOf(cmd)
   if (said) runCommand($, said)
-  else void ack($, W.cmdIdOf(cmd), 'failed', SE.steeringRefusalOf(cmd))
+  else void ackPage($, W.cmdIdOf(cmd), 'failed', SE.steeringRefusalOf(cmd))
 }
 
 function editedPathOf(input: Record<string, unknown>): string {
@@ -2307,13 +2307,13 @@ async function raceDeck($: EngineInterface, ev: ToolCallEvent, proceed: ToolCall
     M.dropPending(data, id)
     if (answered) {
       M.addMessage(data, { from: M.YOU, to: agentId, kind: 'choice', text: `You answered: ${M.answeredOf(questions, answered.answers)}`, at: now, callId: id, ...(answered.ackId ? { ackId: answered.ackId } : {}) })
-      await ack($, answered.ackId, 'answered', 'Claude carries on')
+      await ackPage($, answered.ackId, 'answered', 'Claude carries on')
     } else if (said) {
       const words = M.answeredOf(questions, said.answers) || F.oneLine(said.response)
       const how = said.isIdle ? 'Auto-answered after idle' : 'Answered in Claude Code'
       M.addMessage(data, { from: M.YOU, to: agentId, kind: 'choice', text: words ? `${how}: ${words}` : how, at: now, callId: id })
     }
-    if (!answered && late.answer) await ack($, late.answer.ackId, 'failed', end === 'idle' ? 'Auto-answered after idle' : end === 'engine' ? 'Already answered in Claude Code' : 'No longer pending')
+    if (!answered && late.answer) await ackPage($, late.answer.ackId, 'failed', end === 'idle' ? 'Auto-answered after idle' : end === 'engine' ? 'Already answered in Claude Code' : 'No longer pending')
     touched($, now)
   } catch {
     // the answer stands whatever the deck makes of it
@@ -2334,7 +2334,7 @@ function answerCall($: EngineInterface, callId: string, answers: Record<string, 
   const route = W.routeOf({ cmd: 'answer', callId, answers }, data)
   if (route === null || route.kind !== 'answer') {
     const why = 'Not an answer the deck can read'
-    void ack($, ackId, 'failed', why)
+    void ackPage($, ackId, 'failed', why)
     return why
   }
   return answerQuestion($, route.callId, route.answers, ackId)
@@ -2363,12 +2363,12 @@ function answerQuestion($: EngineInterface, callId: string, answers: Record<stri
   const asker = askers.get(callId)
   if (!asker) {
     const why = answerGoneOf(callId)
-    void ack($, ackId, 'failed', why)
+    void ackPage($, ackId, 'failed', why)
     return why
   }
   const problem = W.answerProblemOf(item, answers)
   if (problem || !item) {
-    void ack($, ackId, 'failed', problem || 'No longer pending')
+    void ackPage($, ackId, 'failed', problem || 'No longer pending')
     return problem || 'No longer pending'
   }
   askers.delete(callId)
@@ -2380,7 +2380,7 @@ function answerQuestion($: EngineInterface, callId: string, answers: Record<stri
 function answerFromPane($: EngineInterface, callId: string, answers: Record<string, string>) {
   const why = answerCall($, callId, answers, '')
   $.ui.toast(why ? `Not answered: ${why}` : 'Answered: Claude carries on')
-  redraw($)
+  redrawDeck($)
 }
 
 /** An answer given in the sample: its question taken down there alone (`W.answeredInSample`), nothing sent to Claude. */
@@ -2391,7 +2391,7 @@ async function answerInSample($: EngineInterface, callId: string, answers: Recor
   const words = answered.words
   demo.version += 1
   $.ui.toast(`Sample data: you answered ${F.trunc(words, 120)}. Nothing was sent to Claude.`)
-  redraw($)
+  redrawDeck($)
 }
 
 /** Marks the commits a shell command made as that agent's. */
@@ -2431,7 +2431,7 @@ function startProbe($: EngineInterface) {
   probe.timer?.cancel()
   probe.timer = $.clock.every(1500, () => {
     probe.tick += 1
-    redraw($)
+    redrawDeck($)
   })
 }
 
@@ -2612,7 +2612,7 @@ export const register: Register = on => {
     void syncAgents($)
     // what a reload lost (the goal, an ended agent's result), read back from the transcripts: never awaited, it redraws when done
     void recoverLost($)
-    timers.tick = $.clock.every(2500, () => void tick($))
+    timers.tick = $.clock.every(2500, () => void deckTick($))
 
     return next(e)
   })
@@ -2625,7 +2625,7 @@ export const register: Register = on => {
     closeCommit()
     closeFileDiff()
     await clearWeb($)
-    changed($)
+    deckChanged($)
     return result
   })
 
@@ -3377,7 +3377,7 @@ export const register: Register = on => {
   // Org's chart Client failed: that surface's Org lists the agents as a tree until Org is left (or /eagle-eye opens)
   on('ui.fault', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     orgDown.add(e.surface)
-    redraw($)
+    redrawDeck($)
     return next(e)
   })
 
@@ -3493,7 +3493,7 @@ export const register: Register = on => {
   // what the probe's Client posts (a click's cell); only this plugin's hooks hear it
   on('ui.message', { component: 'Pane', requestId: PROBE }, async ($, e, next) => {
     probe.message = jsonLine(e.data)
-    redraw($)
+    redrawDeck($)
     return next(e)
   })
 
@@ -3501,7 +3501,7 @@ export const register: Register = on => {
   on('ui.fault', { component: 'Pane', requestId: PROBE }, async ($, e, next) => {
     probe.fault = { surface: e.surface, phase: e.phase, reason: F.oneLine(e.reason) }
     probe.failedOn.add(e.surface)
-    redraw($)
+    redrawDeck($)
     return next(e)
   })
 }
@@ -3855,7 +3855,7 @@ export async function chooseRepo($: EngineInterface, root: string): Promise<stri
   book.pinned = pin
   savePin($)
   git = { ...git, ...bookFields() }
-  redraw($)
+  redrawDeck($)
   await refreshGit($, true)
   return ''
 }
@@ -4232,7 +4232,7 @@ export async function loadFileDiff($: EngineInterface, path: string): Promise<vo
   if (!R.sameRoot(root, git.root)) return
   const isSame = fileDiff !== null && sameFileDiff(fileDiff, found)
   fileDiff = found
-  if (!isSame) redraw($)
+  if (!isSame) redrawDeck($)
 }
 
 /** Whether two reads of a file's diff show the same; when each was read does not count. */
@@ -4265,7 +4265,7 @@ export async function loadCommit($: EngineInterface, hash: string): Promise<void
     patch: patch.out.slice(0, cap),
     isPatchCut: patch.out.length > cap,
   }
-  redraw($)
+  redrawDeck($)
 }
 
 // ----------------------------------------------------------------------
@@ -4974,11 +4974,11 @@ async function runWeb($: EngineInterface, epoch: number): Promise<void> {
     web.note = web.dir === '' ? 'No home folder is known (HOME), so the dashboard has nowhere to keep its state.' : 'Its state folder could not be made private, so the dashboard does not start.'
     saveWeb($)
     settleWeb(false)
-    redraw($)
+    redrawDeck($)
     return
   }
   saveWeb($)
-  redraw($)
+  redrawDeck($)
   web.lastKey = ''
   web.agentFiles.clear()
   timelineWritten.key = ''
@@ -4991,7 +4991,7 @@ async function runWeb($: EngineInterface, epoch: number): Promise<void> {
   if (!web.isOn) {
     web.status = 'off'
     settleWeb(false)
-    redraw($)
+    redrawDeck($)
     return
   }
   web.keptPort = web.port
@@ -5021,7 +5021,7 @@ async function runWeb($: EngineInterface, epoch: number): Promise<void> {
       : `The dashboard's server did not start${ran.why ? ` (${ran.why})` : ''}.`
   }
   settleWeb(false)
-  redraw($)
+  redrawDeck($)
 }
 
 /** The last line a stream said, on one row. */
@@ -5098,7 +5098,7 @@ function onWebLine($: EngineInterface, line: string): boolean {
   if (said.kind === 'used') {
     if (said.nonce === W.nonceOf(web.shown)) {
       web.shown = ticketFor('full')
-      redraw($)
+      redrawDeck($)
     }
     return false
   }
@@ -5113,7 +5113,7 @@ function onWebLine($: EngineInterface, line: string): boolean {
     settleWeb(true)
     // the page open before a reload knows the old port only
     if (kept > 0 && kept !== said.port) $.ui.toast('Eagle Eye web started again on another port: /eagle-eye web opens it again, and /eagle-eye shows its new link.')
-    redraw($)
+    redrawDeck($)
     return true
   }
   // in your voice from the Browser pane's page, or any press of it for another session's deck: it waits for your Send above the prompt
@@ -5167,7 +5167,7 @@ async function holdFromPage($: EngineInterface, cmd: Record<string, unknown>): P
   const gone = route?.kind === 'answer' ? answerGoneOf(route.callId) : ''
   const refusal = isElsewhere ? SE.steeringRefusalOf(cmd) : other ? (SE.steeringCmdOf(other.cmd) ? '' : SE.steeringRefusalOf(other.cmd)) : route === null ? W.refusalOf(cmd, currentData()) : gone
   if (refusal !== '' || held.items.length >= H.MOST_HELD) {
-    void ack($, ackId, 'failed', refusal || H.FULL_TEXT)
+    void ackPage($, ackId, 'failed', refusal || H.FULL_TEXT)
     return
   }
   const now = await $.clock.now()
@@ -5176,11 +5176,11 @@ async function holdFromPage($: EngineInterface, cmd: Record<string, unknown>): P
   held.seq += 1
   held.items.push(H.heldOf(other ? other.cmd : cmd, `h${held.seq}`, now, other?.session ?? '', to))
   held.version += 1
-  await ack($, ackId, 'held', H.HELD_TEXT)
+  await ackPage($, ackId, 'held', H.HELD_TEXT)
   $.ui.toast('From the web page: it waits above your prompt for your Send.')
   // it goes unsent once its ten minutes are up (the tick looks too)
   $.clock.after(H.HOLD_MS, () => void pruneHeld($))
-  redraw($)
+  redrawDeck($)
 }
 
 /** Takes held command `key` out of the queue; undefined when it went already. */
@@ -5199,7 +5199,7 @@ function takeHeld(key: string): H.Held | undefined {
  * page's id); one for another session's deck goes into its inbox, sealed,
  * as ever. A long or many-line one goes only while its row is open (More).
  */
-export function sendHeld($: EngineInterface, key: string): void {
+export function sendHeldMessage($: EngineInterface, key: string): void {
   // a long or many-line one goes only once it is open, its whole text on screen (the band draws its Send only then)
   const shown = H.heldRowsOf(held.items.filter(one => one.key === key), held.open)[0]
   if (!shown || (shown.isLong && !shown.isOpen)) return
@@ -5210,26 +5210,26 @@ export function sendHeld($: EngineInterface, key: string): void {
   } else {
     void SR.fromPage(item.session, item.cmd).then(why => {
       // its own deck acks it in its own state; here the word it went
-      if (why === '') void ack($, item.ackId, 'queued', 'Sent to its deck')
+      if (why === '') void ackPage($, item.ackId, 'queued', 'Sent to its deck')
     })
   }
-  redraw($)
+  redrawDeck($)
 }
 
 /** Your Discard on a held row: nothing is sent, and the page's ack says so. */
-export function discardHeld($: EngineInterface, key: string): void {
+export function discardHeldMessage($: EngineInterface, key: string): void {
   const item = takeHeld(key)
   if (!item) return
-  void ack($, item.ackId, 'failed', H.unsentText('discarded'))
-  redraw($)
+  void ackPage($, item.ackId, 'failed', H.unsentText('discarded'))
+  redrawDeck($)
 }
 
 /** More and Less on a held row too long for one line: its whole text shown, or its start again. */
-export function toggleHeld($: EngineInterface, key: string): void {
+export function toggleHeldMessage($: EngineInterface, key: string): void {
   if (!held.items.some(item => item.key === key)) return
   if (!held.open.delete(key)) held.open.add(key)
   held.version += 1
-  redraw($)
+  redrawDeck($)
 }
 
 /** The held commands whose ten minutes are up go unsent, and an answer held for a question that no longer waits goes with why; the page's acks say so. */
@@ -5244,9 +5244,9 @@ export async function pruneHeld($: EngineInterface): Promise<void> {
     if (!expired.has(item) && gone === '') continue
     takeHeld(item.key)
     isChanged = true
-    void ack($, item.ackId, 'failed', gone || H.unsentText('expired'))
+    void ackPage($, item.ackId, 'failed', gone || H.unsentText('expired'))
   }
-  if (isChanged) redraw($)
+  if (isChanged) redrawDeck($)
 }
 
 /** Starts the web deck when it is not running, and waits (10 s at most) for its server to be up. */
@@ -5258,7 +5258,7 @@ async function ensureWeb($: EngineInterface): Promise<boolean> {
     web.status = 'starting'
     web.note = ''
     web.opened = ''
-    redraw($)
+    redrawDeck($)
     askWeb()
   }
   return new Promise<boolean>(resolve => {
@@ -5314,7 +5314,7 @@ async function openInBrowser($: EngineInterface, url: string): Promise<boolean> 
 async function showWeb($: EngineInterface, url: string): Promise<void> {
   const isOpened = await openInBrowser($, url)
   web.opened = isOpened ? 'opened' : 'failed'
-  redraw($)
+  redrawDeck($)
 }
 
 /**
@@ -5381,7 +5381,7 @@ export async function openWeb($: EngineInterface, where: 'own' | 'pane'): Promis
   }
   if (await isTerminalOnly($)) {
     web.opened = 'failed'
-    redraw($)
+    redrawDeck($)
     return { text: WEB_NO_PANE_TEXT, context: WEB_CONTEXT }
   }
   void showWeb($, W.webUrlOf(web.port, ticketFor('pane')))
@@ -5475,7 +5475,7 @@ export function stopWeb($: EngineInterface): boolean {
   saveWeb($)
   web.stop?.()
   settleWeb(false)
-  redraw($)
+  redrawDeck($)
   return wasOn
 }
 
@@ -5542,7 +5542,7 @@ function avatarsCommand($: EngineInterface, words: string): CommandRunResult {
   if (words === '') return { text: `Avatar styles (now ${AV.styleName(currentView().avatarStyle)}):\n${list}\n/eagle-eye avatars <style> draws another, here and on the web page, in every session. The pane's Settings (6) picks one too.` }
   const style = avatarStyleNamed(words)
   if (style === undefined) return { text: `No avatar style called "${F.trunc(F.oneLine(words), 40)}". One of: ${AV.STYLE_IDS.join(', ')}.` }
-  setAvatarStyle($, style)
+  applyAvatarStyle($, style)
   return { text: `Avatars: ${AV.styleName(style)}, in every session: the pane, the web page and /eagle-eye demo draw them (the terminal as one character each); /eagle-eye avatars lists the others.` }
 }
 
@@ -5562,13 +5562,13 @@ export async function runEagleEye($: EngineInterface, ev: Pick<CommandRunInput, 
   if (arg === 'band') {
     currentView().isBandHidden = !currentView().isBandHidden
     savePrefs($)
-    changed($)
+    deckChanged($)
     return { text: currentView().isBandHidden ? 'The agents band above the prompt is hidden. /eagle-eye band shows it again.' : 'The agents band shows above the prompt while subagents run.' }
   }
   if (arg === 'avatars' || arg.startsWith('avatars ')) return avatarsCommand($, arg.slice('avatars'.length).trim())
   // the deck's own tidying: finished agents hidden from the Dashboard, Chat and Org (nothing in Claude Code), or shown again
-  if (arg === 'clear') return { text: await clearFinished($) }
-  if (arg === 'clear show' || arg === 'clear undo') return { text: await showCleared($) }
+  if (arg === 'clear') return { text: await clearFinishedAgents($) }
+  if (arg === 'clear show' || arg === 'clear undo') return { text: await showClearedAgents($) }
   if (arg === 'probe') return toggleProbe($)
   // the live dashboard: started if need be, opened in your own browser; or, asked for, in Claude's Browser pane
   const words = arg.split(/\s+/)
@@ -5582,14 +5582,14 @@ export async function runEagleEye($: EngineInterface, ev: Pick<CommandRunInput, 
   if (arg === 'sessions' || arg === 'all') {
     if (!SR.isListOpen()) toggleSessions($)
     const isShown = await openPane($)
-    changed($)
+    deckChanged($)
     return isShown ? {} : { text: 'Eagle Eye is open and waiting for room: widen the window, or press ctrl+x then tab.' }
   }
   // the sample: the deck drawn from the v2 sample
   if (arg === 'demo' || arg === 'sample') {
     const why = await loadDemo($, true)
     const isShown = await openPane($)
-    changed($)
+    deckChanged($)
     if (why) return { text: why }
     return isShown ? {} : { text: 'Eagle Eye is open and waiting for room: widen the window, or press ctrl+x then tab.' }
   }
@@ -5601,6 +5601,6 @@ export async function runEagleEye($: EngineInterface, ev: Pick<CommandRunInput, 
   const tab = arg === '' ? 'now' : M.v2TabFor(words[0] ?? '')
   if (tab) currentView().v2 = M.view2With(currentView().v2, { tab })
   const isPlaced = await openPane($)
-  changed($)
+  deckChanged($)
   return isPlaced ? {} : { text: 'Eagle Eye is open and waiting for room: widen the window, or press ctrl+x then tab.' }
 }
