@@ -235,20 +235,27 @@ test('a permission prompt is held on you only once its dialog shows (a tool.chec
   expect(state.agents.find(one => one.id === 'agent-x1')?.status).toBe('running')
 })
 
-test('no permission prompt is held without a dialog: an ask no dialog follows, a dialog a settings hook decided, a question or a plan (their dialogs are your say), a query with no call; one refused is taken down', async ($, on) => {
+test('no permission prompt is held without a dialog: a question or a plan (their dialogs are your say), a query with no call; one a settings hook decided is held only until its call ends; one refused is taken down', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const w = newWorld({ holding: ['Edit', 'ExitPlanMode', 'WebFetch'] })
   world(on, w)
   await work($)
 
-  // a settings hook decides the dialog itself
+  // a settings hook decides the dialog itself. The deck passes the request on unread (the plugin directory accepts
+  // a permission hook only in that form), so it cannot tell: the call is held on you until it ends, as the hook's allow lets it
   w.isDecided = true
   const edit = { file_path: '/work/src/range.js', old_string: 'a', new_string: 'b' }
-  void $.tool.call({ tool: 'Edit', tool_use_id: 'toolu_e1', ...edit } as never)
+  const edited = $.tool.call({ tool: 'Edit', tool_use_id: 'toolu_e1', ...edit } as never)
   await clock.settle()
   await $.tool.check({ tool: 'Edit', input: edit, tool_use_id: 'toolu_e1' })
   await $.classic.PermissionRequest({ tool_name: 'Edit', tool_input: edit })
   w.isDecided = false
+  await clock.advance(400)
+  expect(lastState(w).pending).toMatchObject([{ id: 'toolu_e1', kind: 'permission', tool: 'Edit' }])
+  w.held[0]?.settle({ result: { filePath: edit.file_path } })
+  await edited
+  await clock.advance(400)
+  expect(lastState(w).pending).toEqual([])
   // ExitPlanMode's dialog is the plan's approval; a query (no call) is no prompt at all
   void $.tool.call({ tool: 'ExitPlanMode', tool_use_id: 'toolu_p1' } as never)
   await clock.settle()
