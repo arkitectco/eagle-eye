@@ -223,9 +223,9 @@ function textPx(text: string, size: number): number {
 
 const FONT = 'Anthropic Sans, anthropic-sans, system-ui, -apple-system, Segoe UI, sans-serif'
 
-/** An SVG document `w` × `h` of `parts`. */
-function svgDoc(w: number, h: number, parts: readonly string[]): string {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" font-family="${FONT}">${parts.join('')}</svg>`
+/** An SVG document `w` × `height` of `parts`. */
+function svgDoc(w: number, height: number, parts: readonly string[]): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${height}" viewBox="0 0 ${w} ${height}" font-family="${FONT}">${parts.join('')}</svg>`
 }
 
 /** The room a lane's image leaves its axis: 4 px before it, 10 after it (an end's cap, the now line). */
@@ -235,43 +235,43 @@ const PAD_RIGHT = 10
 /** A row's image heights, px: an agent's two lines, a background task's one, the axis's. */
 const ROW_PX = { lane: 38, bg: 18, axis: 18 } as const
 
-/** The gridlines and the folds' ground under a row `h` high, a fold's break hatched where the row lived across it. */
-function groundOf(axis: Lanes.Axis, grid: readonly number[], h: number, lived: (fold: { from: number; to: number }) => boolean): string[] {
+/** The gridlines and the folds' ground under a row `height` high, a fold's break hatched where the row lived across it. */
+function groundOf(axis: Lanes.Axis, grid: readonly number[], height: number, lived: (fold: { from: number; to: number }) => boolean): string[] {
   const out: string[] = []
-  if (grid.length > 0) out.push(`<path d="${grid.map(x => `M${n1(x)} 0V${h}`).join('')}" stroke="${TL.grid}"/>`)
-  const mid = h / 2
+  if (grid.length > 0) out.push(`<path d="${grid.map(x => `M${n1(x)} 0V${height}`).join('')}" stroke="${TL.grid}"/>`)
+  const mid = height / 2
   for (const one of axis.folds) {
-    out.push(`<rect x="${n1(one.x0 + 1)}" y="0" width="${n1(Math.max(1, one.x1 - one.x0 - 2))}" height="${h}" fill="${TL.fold}"/>`)
+    out.push(`<rect x="${n1(one.x0 + 1)}" y="0" width="${n1(Math.max(1, one.x1 - one.x0 - 2))}" height="${height}" fill="${TL.fold}"/>`)
     const cx = (one.x0 + one.x1) / 2
     if (lived(one)) out.push(`<path d="M${n1(cx - 5)} ${n1(mid + 5)}l4 -10M${n1(cx + 1)} ${n1(mid + 5)}l4 -10" stroke="${TL.hatch}" stroke-width="1.3" fill="none"/>`)
   }
   return out
 }
 
-/** The messages' marks on a row `h` high: out of the sender's lane toward the receiver's row (its number beside it), into the receiver's, a dashed line through the rows between. */
-function marksOf(axis: Lanes.Axis, crossings: readonly Lanes.Crossing[], h: number): string[] {
+/** The messages' marks on a row `height` high: out of the sender's lane toward the receiver's row (its number beside it), into the receiver's, a dashed line through the rows between. */
+function marksOf(axis: Lanes.Axis, crossings: readonly Lanes.Crossing[], height: number): string[] {
   const out: string[] = []
-  const mid = h / 2
+  const mid = height / 2
   for (const one of crossings) {
     const x = n1(axis.x(one.at))
     if (one.role === 'pass') {
-      out.push(`<path d="M${x} 0V${h}" stroke="${TL.pass}" stroke-dasharray="2 2"/>`)
+      out.push(`<path d="M${x} 0V${height}" stroke="${TL.pass}" stroke-dasharray="2 2"/>`)
       continue
     }
-    const edge = (one.role === 'from') === one.down ? h : 0
+    const edge = (one.role === 'from') === one.down ? height : 0
     const bar = (one.role === 'from') === one.down ? mid + 7 : mid - 7
     const [y1, y2] = one.role === 'from' ? [bar, edge] : [edge, bar]
     const dir = y2 > y1 ? 1 : -1
     out.push(`<path d="M${x} ${n1(y1)}V${n1(y2 - dir * 3)}" stroke="${TL.message}" stroke-width="1.4"/><path d="M${x} ${n1(y2)}l-3.2 ${n1(-dir * 4.5)}h6.4z" fill="${TL.message}"/>`)
-    if (one.role === 'from') out.push(`<text x="${n1(axis.x(one.at) + 4)}" y="${n1(one.down ? h - 2 : 9)}" font-size="9.5" font-weight="600" fill="${TL.message}">${one.n}</text>`)
+    if (one.role === 'from') out.push(`<text x="${n1(axis.x(one.at) + 4)}" y="${n1(one.down ? height - 2 : 9)}" font-size="9.5" font-weight="600" fill="${TL.message}">${one.n}</text>`)
   }
   return out
 }
 
-/** A lane's image `w` × `h`: its ground, idle dotted, thinking a thin bar, its calls as segments (named where the name fits), its waits on you, your prompts, its end's cap, the messages' marks, now. */
-function laneSvg(timeline: V2Timeline, lane: V2Lane, axis: Lanes.Axis, grid: readonly number[], crossings: readonly Lanes.Crossing[], w: number, h: number): string {
-  const mid = h / 2
-  const out = groundOf(axis, grid, h, fold => livedAcross(lane.start, lane.end, fold))
+/** A lane's image `w` × `height`: its ground, idle dotted, thinking a thin bar, its calls as segments (named where the name fits), its waits on you, your prompts, its end's cap, the messages' marks, now. */
+function laneSvg(timeline: V2Timeline, lane: V2Lane, axis: Lanes.Axis, grid: readonly number[], crossings: readonly Lanes.Crossing[], w: number, height: number): string {
+  const mid = height / 2
+  const out = groundOf(axis, grid, height, fold => livedAcross(lane.start, lane.end, fold))
   const to = (at: number | null) => axis.x(at ?? axis.span)
   const idle = lane.spans.filter(one => one.kind === 'idle').map(one => `M${n1(axis.x(one.from) + 2)} ${mid}H${n1(Math.max(axis.x(one.from) + 2, to(one.to) - 2))}`)
   if (idle.length > 0) out.push(`<path d="${idle.join('')}" stroke="${TL.idle}" stroke-width="2" stroke-dasharray="2 3" fill="none"/>`)
@@ -301,32 +301,32 @@ function laneSvg(timeline: V2Timeline, lane: V2Lane, axis: Lanes.Axis, grid: rea
     else if (lane.outcome === 'failed') out.push(`<circle cx="${n1(x)}" cy="${mid}" r="6.5" fill="${TL.fail}"/><path d="M${n1(x - 2.5)} ${mid - 2.5}l5 5m0 -5l-5 5" stroke="#450a0a" stroke-width="1.8" stroke-linecap="round"/>`)
     else out.push(`<rect x="${n1(x - 4.5)}" y="${mid - 4.5}" width="9" height="9" rx="1.5" fill="${TL.stopped}"/>`)
   }
-  out.push(...marksOf(axis, crossings, h))
-  out.push(`<path d="M${n1(axis.room)} 0V${h}" stroke="${TL.now}" stroke-dasharray="3 3"/>`)
-  return svgDoc(w, h, [`<g transform="translate(${PAD_LEFT} 0)">`, ...out, '</g>'])
+  out.push(...marksOf(axis, crossings, height))
+  out.push(`<path d="M${n1(axis.room)} 0V${height}" stroke="${TL.now}" stroke-dasharray="3 3"/>`)
+  return svgDoc(w, height, [`<g transform="translate(${PAD_LEFT} 0)">`, ...out, '</g>'])
 }
 
 /** A background task's image: its ground, a grey bar from its call to its end (a cap there) or to now, the messages' lines through it. */
-function backgroundSvg(bg: V2BackgroundLane, axis: Lanes.Axis, grid: readonly number[], crossings: readonly Lanes.Crossing[], w: number, h: number): string {
-  const mid = h / 2
-  const out = groundOf(axis, grid, h, fold => livedAcross(bg.start, bg.end, fold))
+function backgroundSvg(bg: V2BackgroundLane, axis: Lanes.Axis, grid: readonly number[], crossings: readonly Lanes.Crossing[], w: number, height: number): string {
+  const mid = height / 2
+  const out = groundOf(axis, grid, height, fold => livedAcross(bg.start, bg.end, fold))
   const a = axis.x(bg.start)
   const b = axis.x(bg.end ?? axis.span)
   out.push(`<rect x="${n1(a)}" y="${mid - 3}" width="${n1(Math.max(3, b - a))}" height="6" rx="3" fill="${TL.background}"/>`)
   if (bg.end !== null) out.push(`<rect x="${n1(Math.max(a, b - 3))}" y="${mid - 4}" width="6" height="8" rx="1.5" fill="${TL.backgroundEnd}"/>`)
-  out.push(...marksOf(axis, crossings, h))
-  out.push(`<path d="M${n1(axis.room)} 0V${h}" stroke="${TL.now}" stroke-dasharray="3 3"/>`)
-  return svgDoc(w, h, [`<g transform="translate(${PAD_LEFT} 0)">`, ...out, '</g>'])
+  out.push(...marksOf(axis, crossings, height))
+  out.push(`<path d="M${n1(axis.room)} 0V${height}" stroke="${TL.now}" stroke-dasharray="3 3"/>`)
+  return svgDoc(w, height, [`<g transform="translate(${PAD_LEFT} 0)">`, ...out, '</g>'])
 }
 
 /** The axis over the lanes: its words (`Lanes.axisWordsOf`), a fold's in a lighter grey, "now" in blue. */
-function axisSvg(words: readonly Lanes.AxisWord[], w: number, h: number): string {
+function axisSvg(words: readonly Lanes.AxisWord[], w: number, height: number): string {
   const anchor = { start: 'start', middle: 'middle', end: 'end' } as const
   const out = words.map(word => {
     const fill = word.kind === 'now' ? TL.now : word.kind === 'fold' ? TL.foldWords : TL.axis
-    return `<text x="${n1(word.x)}" y="${h - 5}" fill="${fill}" font-size="${word.kind === 'fold' ? 10 : 11}" text-anchor="${anchor[word.align]}">${esc(word.text)}</text>`
+    return `<text x="${n1(word.x)}" y="${height - 5}" fill="${fill}" font-size="${word.kind === 'fold' ? 10 : 11}" text-anchor="${anchor[word.align]}">${esc(word.text)}</text>`
   })
-  return svgDoc(w, h, [`<g transform="translate(${PAD_LEFT} 0)">`, ...out, '</g>'])
+  return svgDoc(w, height, [`<g transform="translate(${PAD_LEFT} 0)">`, ...out, '</g>'])
 }
 
 /** The images made, by lane and what they draw (the axis's span to the minute on a long run): a redraw of the same state, or a still lane within its minute, makes none again. */
