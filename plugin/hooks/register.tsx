@@ -1953,7 +1953,8 @@ function registryHost($: EngineInterface): SR.RegistryHost {
     stat: path => $.fs.stat(path),
     storeGet: key => $.store.get(key),
     storeSet: (key, value) => $.store.set(key, value),
-    node: args => $.process.run(['node', ...args], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) }),
+    alive: pids => $.process.run(['node', `${`${$.plugin.root}`.replace(/[\\/]+$/, '')}/web/alive.js`, ...pids], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) }),
+    remove: paths => $.process.run(['node', `${`${$.plugin.root}`.replace(/[\\/]+$/, '')}/web/remove.js`, ...paths], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) }),
     every: (ms, fn) => $.clock.every(ms, fn),
     after: (ms, fn) => $.clock.after(ms, fn),
     surfaces: () => $.session.surfaces(),
@@ -3433,14 +3434,8 @@ export const register: Register = on => {
 
   // how the main loop's session began (Claude Code's SessionStart): a fork's spend counts the session it was forked from
   on('classic.SessionStart', async ($, e, next) => {
-    const result = await next(e)
-    if (e.agent_id !== undefined) return result
-    startedAs = e.source
-    const wasFork = data.isFork === true
-    noteStart(e.source)
-    // before session.start the deck has nothing to show yet: session.start applies it
-    if (sessionId !== '' && (data.isFork === true) !== wasFork) touched($, await $.clock.now())
-    return result
+    void sessionBegan($, e)
+    return next(e)
   })
 
   on('prompt.context', async ($, e, next) => {
@@ -4903,10 +4898,24 @@ async function writeWeb($: EngineInterface): Promise<void> {
 /** Org's Timeline as timeline.json was last written, its time left out: it is written again only when it changed. */
 const timelineWritten = { key: '' }
 
+/**
+ * Notes how the main loop's session began. The hook on classic.SessionStart
+ * hands it the event and returns `next(e)` as written, so what the session
+ * starts with is Claude Code's alone.
+ */
+async function sessionBegan($: EngineInterface, ev: { agent_id?: string; source: string }): Promise<void> {
+  if (ev.agent_id !== undefined) return
+  startedAs = ev.source
+  const wasFork = data.isFork === true
+  noteStart(ev.source)
+  // before session.start the deck has nothing to show yet: session.start applies it
+  if (sessionId !== '' && (data.isFork === true) !== wasFork) touched($, await $.clock.now())
+}
+
 /** The session's own process id, read as the parent of a node it starts (no shell between); '' when node cannot say. */
 async function enginePidOf($: EngineInterface): Promise<string> {
   try {
-    const ran = await $.process.run(['node', '-p', 'process.ppid'], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
+    const ran = await $.process.run(['node', `${`${$.plugin.root}`.replace(/[\\/]+$/, '')}/web/pid.js`], { timeoutMs: 10_000, ...(nodeCwd() ? { cwd: nodeCwd() } : {}) })
     const pid = ran.stdout.trim()
     return ran.exitCode === 0 && /^\d+$/.test(pid) ? pid : ''
   } catch {
