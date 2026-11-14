@@ -27,7 +27,7 @@ It starts two programs, `node` and `git`, never through a shell.
 - `node web/home.js` makes Eagle Eye's folders and files private and removes what a session no longer needs.
 - `node web/files.js` reads untracked files and git attribute files for Changes. It opens each by its real path inside the repository and refuses links.
 - `node web/pid.js` prints the session's process id, `node web/alive.js` checks whether other listed sessions' processes still run, and `node web/remove.js` deletes registry and inbox files the mod made. Each is a few lines long, and the mod runs no inline script.
-- `git -C <repository>` runs read-only commands for Changes: `config --list`, `rev-parse`, `status`, `diff`, `log`, `rev-list`, `show`, `ls-files` and `cat-file`. Remote protocols (`file`, `git`, `ssh`, `http`, `https`, `ext`) are switched off for every one of them, and so are the hooks, filters and helpers a repository's own settings name.
+- `git -C <repository>` runs read-only commands for Changes: `config --list`, `rev-parse`, `status`, `diff`, `log`, `rev-list`, `show`, `ls-files` and `cat-file`. Every remote protocol git knows is switched off for every one of them, and so are the hooks, filters and helpers a repository's own settings name.
 
 ### The tools it calls itself
 
@@ -79,7 +79,7 @@ It reads Claude Code's events for the session, the session's own transcript (to 
 
 ### Fonts and images
 
-`web/fonts/` holds the web page's typefaces as `.woff2` files, and `assets/icon.png` is its icon. The page's stylesheet and scripts name them so the browser can load them, as any web page does. Nothing runs them as code, and no command in the plugin is pointed at one.
+The web folder's fonts folder holds the web page's typefaces as `.woff2` files, and the PNG in the assets folder is its icon. The page's stylesheet and scripts name them so the browser can load them, as any web page does. Nothing runs them as code, and no command in the plugin is pointed at one.
 
 ### Rebuilding saved state
 
