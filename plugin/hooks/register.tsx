@@ -269,10 +269,10 @@ function listenForBeat($: EngineInterface, beats: Beats, surface: RenderSurface,
 
 /** Stops listening for a surface's Client, or for them all: it is drawn no longer. */
 function stopListening(beats: Beats, surface?: RenderSurface) {
-  for (const [on, beat] of beats) {
-    if (surface !== undefined && on !== surface) continue
+  for (const [heardOn, beat] of beats) {
+    if (surface !== undefined && heardOn !== surface) continue
     beat.timer.cancel()
-    beats.delete(on)
+    beats.delete(heardOn)
   }
 }
 
