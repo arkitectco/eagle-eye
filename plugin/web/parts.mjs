@@ -167,7 +167,7 @@ export function NameLink(id, size = 16) {
 }
 
 // ----------------------------------------------------------------- markdown
-// Paragraphs, headings, lists, code spans, bold, fenced blocks. Built as
+// Paragraphs, headings, lists, tables, code spans, bold, fenced blocks. Built as
 // vnodes, never innerHTML, so agent text cannot inject markup.
 
 export function inline(text) {
@@ -189,6 +189,30 @@ export function inline(text) {
 /** Inline words (`inline`) with their links as plain words: for words inside a link of their own. */
 export const unlinked = parts => parts.map(x => (x && typeof x === 'object' && x.t === 'a' ? x.c : x));
 
+/** A table row's cells: split on the bars outside code spans (`\\|` is a bar in a cell), the outer bars left off. */
+function cellsOf(line) {
+  const cells = [];
+  let cell = '', ticks = 0;
+  const row = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  for (let i = 0; i < row.length; i++) {
+    const c = row[i];
+    if (c === '\\' && row[i + 1] === '|') { cell += '|'; i++; continue; }
+    if (c === '`') ticks ^= 1;
+    if (c === '|' && !ticks) { cells.push(cell.trim()); cell = ''; continue; }
+    cell += c;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+/** The alignments a table's rule row gives (`|:--|:-:|--:|`), or null: the line is no rule row. */
+function ruleOf(line) {
+  if (!line || !line.includes('|') || !line.includes('-')) return null;
+  const cells = cellsOf(line);
+  if (!cells.every(c => /^:?-+:?$/.test(c))) return null;
+  return cells.map(c => (c.endsWith(':') ? (c.startsWith(':') ? 'center' : 'right') : null));
+}
+
 export function Markdown(text) {
   const blocks = [];
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
@@ -203,6 +227,19 @@ export function Markdown(text) {
       const body = [];
       for (i++; i < lines.length && !lines[i].trim().startsWith(fence[1]); i++) body.push(lines[i]);
       blocks.push(h('pre', { class: 'pre' }, h('code', null, body.join('\n'))));
+      continue;
+    }
+    // a table: a row of cells over a rule row of as many, then rows until a line with no bar
+    const aligns = line.includes('|') ? ruleOf(lines[i + 1]) : null;
+    if (aligns && cellsOf(line).length === aligns.length) {
+      flushPara(); flushList();
+      const cell = (tag, words, at) => h(tag, { class: aligns[at] ? `md-${aligns[at]}` : null }, inline(words || ''));
+      const head = cellsOf(line), rows = [];
+      for (i += 2; i < lines.length && lines[i].includes('|') && lines[i].trim(); i++) rows.push(cellsOf(lines[i]));
+      i--;
+      blocks.push(h('div', { class: 'md-table' }, h('table', null,
+        h('thead', null, h('tr', null, head.map((words, at) => cell('th', words, at)))),
+        h('tbody', null, rows.map(row => h('tr', null, aligns.map((_, at) => cell('td', row[at], at))))))));
       continue;
     }
     const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line), numbered = /^(\s*)\d+[.)]\s+(.*)$/.exec(line);

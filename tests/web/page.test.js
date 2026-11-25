@@ -1985,6 +1985,27 @@ test('the drawer`s Activity draws words of more lines as Chat draws a message, i
   assert.ok(words.filter(one => one.p.class.includes('is-said') && !lines.includes(one)).every(one => flat(textOf(one)).startsWith('“')))
 })
 
+test('Markdown draws a table (a row of cells over a rule row) as a table: its head, its rows, an empty cell, a bar in a code span, its alignments; a line with bars and no rule row stays words', async () => {
+  const file = JSON.parse(FILES.agent[BUILDER])
+  const last = file.activity[file.activity.length - 1]
+  const text = 'Word count\n\n| | `wc -w` | Count |\n|---|--:|:-:|\n| Before | 5,021 | **4,328** |\n| After | `a|b` |\n\nUse a | b here.'
+  file.words = [...file.words, { kind: 'said', at: last.at + 1000, step: 99, text, after: last.id }]
+  const p = page({ hash: `#/now/agent/${BUILDER}`, files: { ...FILES, agent: { ...FILES.agent, [BUILDER]: JSON.stringify(file) } } })
+  p.load(SAMPLE)
+  p.view('Drawer()')
+  await settle()
+  const drawn = find(p.view('Drawer()'), 'act-word').filter(one => find(one, 'md-table').length > 0)
+  assert.equal(drawn.length, 1)
+  const tags = tag => findAll(drawn[0], one => one.t === tag)
+  assert.equal(tags('table').length, 1)
+  assert.deepEqual(tags('th').map(one => flat(textOf(one))), ['', 'wc -w', 'Count'])
+  assert.deepEqual(tags('td').map(one => flat(textOf(one))), ['Before', '5,021', '4,328', 'After', 'a|b', ''])
+  assert.deepEqual(tags('th').map(one => one.p.class), [null, 'md-right', 'md-center'])
+  // no bar or rule is left as words, and the line with a bar and no rule row is a paragraph
+  assert.ok(!/---|\| Before/.test(textOf(drawn[0])))
+  assert.match(flat(textOf(drawn[0])), /Use a \| b here\./)
+})
+
 test('an agent at work with no call in flight: its card, its row on Org and its drawer show its latest words in italics after a speech mark; a call in flight shows instead', async () => {
   const words = "The tests share one Redis mock that's never reset. Let me clear it in `beforeEach`."
   const between = s => {

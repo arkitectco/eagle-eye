@@ -357,6 +357,14 @@ button, input, textarea { font: inherit; color: inherit; }
 .md li.deep { margin-left: 18px; }
 .md strong { color: var(--fg); font-weight: 600; }
 .md-h { font-weight: 600; color: var(--fg); }
+/* a table wider than its column scrolls in place; its cells keep their words whole */
+.md-table { max-width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+.md-table table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 12.5px; line-height: 1.5; overflow-wrap: normal; }
+.md-table th, .md-table td { max-width: 340px; padding: 6px 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; font-variant-numeric: tabular-nums; }
+.md-table th { color: var(--fg); font-weight: 600; white-space: nowrap; background: rgba(255, 255, 255, 0.03); }
+.md-table tbody tr:last-child td { border-bottom: 0; }
+.md-table .md-right { text-align: right; }
+.md-table .md-center { text-align: center; }
 .code {
   padding: 1px 5px; border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.07); background: rgba(255, 255, 255, 0.06);
@@ -1731,7 +1739,7 @@ button, .mono, .path, .diff, .tooltag, .diffstat, .tag, .pill, .t-meta, .t-eyebr
 .sec-count, .sec-link, .sec-note { color: var(--muted-foreground); }
 .sec-link:hover { color: var(--accent); }
 
-.card, .run-card, .kpi, .need, .members, .chat-list, .composer-box, .drawer, .confirm, .acts, .ins-table, .live, .pre {
+.card, .run-card, .kpi, .need, .members, .chat-list, .composer-box, .drawer, .confirm, .acts, .ins-table, .live, .pre, .md-table {
   border-radius: 0;
   box-shadow: none;
 }
