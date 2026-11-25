@@ -234,14 +234,67 @@ function noteMove(to: string) {
 }
 
 /**
- * The surfaces whose Org chart Client failed (`ui.fault`): their Org lists
+ * How long a Client may go without its beat (it posts `{ type: 'alive' }`
+ * each second while it is mounted) before its surface counts as failed. Read
+ * at this pace, and the first reading is let pass, so a Client that failed
+ * shows within twice this.
+ */
+export const SILENT_MS = 3000
+
+/** The Clients listened to for their beat, by the surface they draw on: the beats heard, and the timer that reads them. */
+type Beats = Map<RenderSurface, { heard: number; timer: Timer }>
+
+/** Whether what a Client posted is its beat. */
+function isBeat(posted: unknown): boolean {
+  return typeof posted === 'object' && posted !== null && (posted as { type?: unknown }).type === 'alive'
+}
+
+/** Listens for the beat of the Client a surface draws, unless it does already: `onSilent` once a whole SILENT_MS passed without one. */
+function listenForBeat($: EngineInterface, beats: Beats, surface: RenderSurface, onSilent: () => void) {
+  if (beats.has(surface)) return
+  // -1: the first reading passes whatever was heard, the time a module takes to load
+  let read = -1
+  const timer = $.clock.every(SILENT_MS, () => {
+    const beat = beats.get(surface)
+    if (!beat) return
+    if (beat.heard !== read) {
+      read = beat.heard
+      return
+    }
+    stopListening(beats, surface)
+    onSilent()
+  })
+  beats.set(surface, { heard: 0, timer })
+}
+
+/** Stops listening for a surface's Client, or for them all: it is drawn no longer. */
+function stopListening(beats: Beats, surface?: RenderSurface) {
+  for (const [on, beat] of beats) {
+    if (surface !== undefined && on !== surface) continue
+    beat.timer.cancel()
+    beats.delete(on)
+  }
+}
+
+/** A beat heard from a surface's Client. */
+function noteBeat(beats: Beats, surface: RenderSurface) {
+  const beat = beats.get(surface)
+  if (beat) beat.heard += 1
+}
+
+/** Org's chart Clients, listened to while a drawing holds one. */
+const chartBeats: Beats = new Map()
+
+/**
+ * The surfaces whose Org chart Client fell silent (no beat for SILENT_MS:
+ * it failed to load, to draw, or while running): their Org lists
  * the agents as a tree while it stays open. A drawing of anything else
  * (another tab, an agent's page, Inspect) clears its surface, so the chart
  * is tried again the next time Org shows; /eagle-eye clears them all.
  */
 export const orgDown = new Set<RenderSurface>()
 
-/** Whether this surface's Org lists the agents instead of its chart: the chart failed there and Org has not been left since. */
+/** Whether this surface's Org lists the agents instead of its chart: the chart fell silent there and Org has not been left since. */
 function isOrgDownOn(surface: RenderSurface): boolean {
   if (view.v2.tab !== 'org' || view.page !== '') orgDown.delete(surface)
   return orgDown.has(surface)
@@ -1774,8 +1827,8 @@ function kitOf(ui: ReturnType<EngineInterface['ui']['resolve']>, surface: Kit['s
   }
 }
 
-/** What the pane draws from: this session's v2 state and its lazy files, or the sample's while it shows (with the sample's sessions); whether Org's chart failed on `surface`, and the agent it marks; another session's deck while one is viewed. */
-function dashOf(now: number, surface: RenderSurface, $: EngineInterface): DashModel {
+/** What the pane draws from: this session's v2 state and its lazy files, or the sample's while it shows (with the sample's sessions); whether Org's chart fell silent on `surface`, the agent it marks, and what to call when the drawing holds its Client; another session's deck while one is viewed. */
+function dashOf(now: number, surface: RenderSurface, $: EngineInterface, onOrgClient?: () => void): DashModel {
   const isDemo = view.isDemo
   const sample = isDemo ? demoShown() : null
   const sampleSessions = sample ? SR.sessionsFor(null, now) : null
@@ -1786,8 +1839,17 @@ function dashOf(now: number, surface: RenderSurface, $: EngineInterface): DashMo
     isDemo,
     demoNote: demo.note,
     isOrgDown: isOrgDownOn(surface),
+    ...(onOrgClient ? { onOrgClient } : {}),
     selected: lastAgent,
   }
+}
+
+/** Listens for the beat of Org's chart Client on a surface: silent, that surface's Org lists the agents as a tree until Org is left (or /eagle-eye opens). */
+function listenForChart($: EngineInterface, surface: RenderSurface) {
+  listenForBeat($, chartBeats, surface, () => {
+    orgDown.add(surface)
+    redrawDeck($)
+  })
 }
 
 /**
@@ -2419,13 +2481,15 @@ const probe: {
   /** Bumped every 1500 ms while the pane is open; each bump redraws it, handing the Client new props. */
   tick: number
   timer?: Timer
-  /** The last `ui.message` the Client posted, as one line of JSON; '' before the first. */
+  /** The last `ui.message` the Client posted besides its beat, as one line of JSON; '' before the first. */
   message: string
-  /** The last `ui.fault` the Client raised. */
-  fault: { surface: RenderSurface; phase: string; reason: string } | null
-  /** Where the Client failed: those drawings leave it out (no fault loop) until the probe opens again. */
+  /** The Client's beats heard since the probe opened, on every surface. */
+  heard: number
+  /** The Clients listened to for their beat, while a drawing holds one. */
+  beats: Beats
+  /** Where the Client fell silent: those drawings leave it out until the probe opens again. */
   failedOn: Set<RenderSurface>
-} = { tick: 0, message: '', fault: null, failedOn: new Set() }
+} = { tick: 0, message: '', heard: 0, beats: new Map(), failedOn: new Set() }
 
 /** Starts the probe's tick, or restarts it. */
 function startProbe($: EngineInterface) {
@@ -2439,6 +2503,15 @@ function startProbe($: EngineInterface) {
 function stopProbe() {
   probe.timer?.cancel()
   probe.timer = undefined
+  stopListening(probe.beats)
+}
+
+/** Listens for the beat of the probe's Client on a surface: silent, that surface's drawing leaves it out and says so. */
+function listenForProbe($: EngineInterface, surface: RenderSurface) {
+  listenForBeat($, probe.beats, surface, () => {
+    probe.failedOn.add(surface)
+    redrawDeck($)
+  })
 }
 
 /**
@@ -2453,7 +2526,8 @@ async function toggleProbe($: EngineInterface): Promise<CommandRunResult> {
   }
   probe.tick = 0
   probe.message = ''
-  probe.fault = null
+  probe.heard = 0
+  stopListening(probe.beats)
   probe.failedOn.clear()
   const opened = await $.ui.open({ id: PROBE, title: 'Eagle Eye probe', focus: true, closeOnEscape: true, rows: 24 })
   startProbe($)
@@ -2491,7 +2565,7 @@ function probeSvg(count: number): string {
 /**
  * The probe pane, top to bottom: the site's numbers and a hex colour in
  * native Text, the Client, an Svg without `isInteractive`, and the last
- * `ui.message` and `ui.fault` the Client caused. Draws it on the terminal and
+ * `ui.message` the Client posted and how many of its beats were heard. Draws it on the terminal and
  * desktop, where Claude Code supports surface modules.
  */
 function probeView(
@@ -2501,10 +2575,10 @@ function probeView(
 ): RenderElement {
   const { Box, Text } = ui
   const viewport = ev.viewport ? `${ev.viewport.columns}×${ev.viewport.rows}` : 'none'
-  const fault = probe.fault
+  const isSilent = probe.failedOn.has(ev.surface)
   let client: RenderElement | string | null | undefined
   if ((ev.surface !== 'terminal' && ev.surface !== 'desktop') || !('Client' in ui)) client = <Text dimColor>{`No Client on ${ev.surface}: its element table has none.`}</Text>
-  else if (probe.failedOn.has(ev.surface)) client = <Text dimColor>{`The Client is left out here after its fault; /eagle-eye probe twice draws it again.`}</Text>
+  else if (isSilent) client = <Text dimColor>{`The Client is left out here after it fell silent; /eagle-eye probe twice draws it again.`}</Text>
   else client = h('Client', { key: 'probe', module: './ui/probe.client.tsx', width: '100%', props: { tick: probe.tick, cols: ev.props.bodyColumns } })
   return (
     <Box flexDirection="column" gap={1}>
@@ -2520,7 +2594,7 @@ function probeView(
       )}
       <Box flexDirection="column">
         <Text dimColor>{`ui.message: ${probe.message || 'none yet'}`}</Text>
-        <Text dimColor>{`ui.fault: ${fault ? `${fault.phase} on ${fault.surface}: ${fault.reason}` : 'none'}`}</Text>
+        <Text dimColor>{`beats: ${probe.heard} heard${isSilent ? `, then none for ${SILENT_MS / 1000} s on ${ev.surface}: it failed to load, to draw, or while running` : ''}`}</Text>
       </Box>
     </Box>
   )
@@ -2650,6 +2724,7 @@ export const register: Register = on => {
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
     isPaneOpen = false
+    stopListening(chartBeats)
     paneFocus = ''
     chatFollow.isShown = false
     return result
@@ -3363,22 +3438,22 @@ export const register: Register = on => {
     const rows = e.surface === 'terminal' ? paneRowsFor(e.props.scroll.bodyRows, e.viewport?.rows) : undefined
     // the terminal: whether the pane holds the keyboard, since its keys type into the prompt while it does not (the desktop's drawing keeps out of it: ./renderMemo)
     const isKeyless = e.surface === 'terminal' && e.props.isFocused === false
-    return drawn.of(`pane:${e.surface}`, [e.props.bodyColumns, rows ?? 0, shownKey, view, isKeyless], () => {
+    // a drawing made anew says whether it holds Org's chart Client; one returned from the memo holds what the last did
+    let holdsClient: boolean | undefined
+    const tree = drawn.of(`pane:${e.surface}`, [e.props.bodyColumns, rows ?? 0, shownKey, view, isKeyless], () => {
+      holdsClient = false
       const kit = { ...kitOf($.ui.resolve(e), e.surface, Math.max(24, e.props.bodyColumns - 1), rows), ...(isKeyless ? { isKeyless } : {}) }
-      return deckView(kit, modelOf(now), actionsFor($), dashOf(now, e.surface, $))
+      return deckView(kit, modelOf(now), actionsFor($), dashOf(now, e.surface, $, () => (holdsClient = true)))
     })
+    if (holdsClient === true) listenForChart($, e.surface)
+    else if (holdsClient === false) stopListening(chartBeats, e.surface)
+    return tree
   })
 
-  // what Org's chart Client posts: a card clicked opens that agent's page
+  // what Org's chart Client posts: its beat each second, and a card clicked, which opens that agent's page
   on('ui.message', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    await openFromChart($, e.data)
-    return next(e)
-  })
-
-  // Org's chart Client failed: that surface's Org lists the agents as a tree until Org is left (or /eagle-eye opens)
-  on('ui.fault', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    orgDown.add(e.surface)
-    redrawDeck($)
+    if (isBeat(e.data)) noteBeat(chartBeats, e.surface)
+    else await openFromChart($, e.data)
     return next(e)
   })
 
@@ -3482,21 +3557,20 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PROBE }, async ($, e) => {
     const ui = $.ui.resolve(e)
     const Svg = e.surface !== 'terminal' && 'Svg' in ui ? ui.Svg : undefined
+    // the surfaces that draw the Client: silent there, it is left out
+    if ((e.surface === 'terminal' || e.surface === 'desktop') && 'Client' in ui && !probe.failedOn.has(e.surface)) listenForProbe($, e.surface)
     return probeView(ui, e, Svg)
   })
 
-  // what the probe's Client posts (a click's cell); only this plugin's hooks hear it
+  // what the probe's Client posts (its beat each second, a click's cell); only this plugin's hooks hear it
   on('ui.message', { component: 'Pane', requestId: PROBE }, async ($, e, next) => {
-    probe.message = jsonLine(e.data)
-    redrawDeck($)
-    return next(e)
-  })
-
-  // the probe's Client failed: say when and why, and leave it out of that surface's drawing
-  on('ui.fault', { component: 'Pane', requestId: PROBE }, async ($, e, next) => {
-    probe.fault = { surface: e.surface, phase: e.phase, reason: F.oneLine(e.reason) }
-    probe.failedOn.add(e.surface)
-    redrawDeck($)
+    if (isBeat(e.data)) {
+      probe.heard += 1
+      noteBeat(probe.beats, e.surface)
+    } else {
+      probe.message = jsonLine(e.data)
+      redrawDeck($)
+    }
     return next(e)
   })
 }

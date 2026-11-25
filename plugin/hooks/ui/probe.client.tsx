@@ -6,14 +6,15 @@
  * Row 0 reports the region's size and what reached the instance, row 1 is a
  * ruler (one digit a cell), then a 4 by 4 grid of 10 by 3 boxes. A pointer
  * down fills the box under it copper and posts the cell to the hooks module
- * (`ui.message`). The state lives in `surface.state`, written only from the
+ * (`ui.message`). Each second it posts `{ type: 'alive' }`, its beat: an
+ * instance that failed is unmounted and falls silent. The state lives in `surface.state`, written only from the
  * input handlers, so a redraw (each tick hands new props) keeps the clicks
  * and the copper box.
  *
  * Self-contained: it runs on the drawing thread, with no `$` and nothing of
  * the plugin's but its props.
  */
-import type { ClientKeyEvent, ClientModule } from 'claude-code'
+import type { ClientKeyEvent, ClientModule, ClientSurface } from 'claude-code'
 
 type ProbeProps = { tick: number; cols: number }
 type ProbeState = { clicks: number; box: readonly [number, number] | null; key: string }
@@ -31,6 +32,25 @@ const GRID = [0, 1, 2, 3] as const
 
 const FIRST: ProbeState = { clicks: 0, box: null, key: 'none' }
 
+/** How often an instance posts its beat. */
+const BEAT_MS = 1000
+
+/** Each instance's beat, by its surface: started once; whether a click was posted since the last one. */
+const beats = new WeakMap<object, { clicked: boolean }>()
+
+/** Starts the instance's beat on its first call: one post now, then one each BEAT_MS for as long as it stays mounted. */
+function startBeat(surface: ClientSurface<ProbeState>) {
+  if (beats.has(surface)) return
+  const beat = { clicked: false }
+  beats.set(surface, beat)
+  surface.post({ type: 'alive' })
+  surface.every(BEAT_MS, () => {
+    // a post replaces one not yet delivered: a beat never goes out over a click
+    if (beat.clicked) beat.clicked = false
+    else surface.post({ type: 'alive' })
+  })
+}
+
 function keyName(event: ClientKeyEvent): string {
   const held = [event.ctrl ? 'ctrl' : '', event.meta ? 'meta' : '', event.shift ? 'shift' : ''].filter(Boolean)
   return [...held, event.key].join('+')
@@ -39,6 +59,7 @@ function keyName(event: ClientKeyEvent): string {
 const Probe: ClientModule<ProbeProps, ProbeState> = (props, surface) => {
   const { Box, Text } = surface.elements
   const state = surface.state ?? FIRST
+  startBeat(surface)
 
   // each listener reads the state as it is when the input comes, so setting them again on every call is safe
   surface.onPointer(event => {
@@ -47,6 +68,8 @@ const Probe: ClientModule<ProbeProps, ProbeState> = (props, surface) => {
     const row = Math.floor((event.y - GRID_TOP) / BOX_ROWS)
     const now = surface.state ?? FIRST
     surface.setState({ ...now, clicks: now.clicks + 1, box: [row, col] })
+    const beat = beats.get(surface)
+    if (beat) beat.clicked = true
     surface.post({ box: [row, col], x: event.x, y: event.y })
   })
   surface.onKey(event => {

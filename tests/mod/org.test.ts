@@ -197,7 +197,8 @@ type Surface = Parameters<typeof Org>[1]
  * One instance as a surface runs it: drawn for its props in a region of a
  * size; each pointer or key event handed to the listener the last drawing
  * set, then drawn again when it set state; new props or a resize draw again,
- * the state kept; what it posts, kept.
+ * the state kept; what it posts, kept (its beats counted apart, and `beat()`
+ * the timer it started coming round).
  *
  * The region's rows reach it as the deck's views hand them, in its props
  * (`rows`, unless the test's props say), and as its surface measures them.
@@ -211,6 +212,7 @@ function mount(first: Props, columns: number, rows: number) {
   let onPointer: ((event: ClientPointerEvent) => void) | undefined
   let onKey: ((event: ClientKeyEvent) => void) | undefined
   const posts: JsonValue[] = []
+  const beats = { heard: 0, timers: [] as Array<{ ms: number; fn: () => void }> }
   const surface = {
     elements: ELEMENTS,
     get state() {
@@ -226,7 +228,10 @@ function mount(first: Props, columns: number, rows: number) {
     get rows() {
       return size.rows
     },
-    every: () => () => {},
+    every(ms: number, fn: () => void) {
+      beats.timers.push({ ms, fn })
+      return () => {}
+    },
     onPointer(fn: (event: ClientPointerEvent) => void) {
       onPointer = fn
       return () => {}
@@ -236,7 +241,8 @@ function mount(first: Props, columns: number, rows: number) {
       return () => {}
     },
     post(data: JsonValue) {
-      posts.push(data)
+      if (data !== null && typeof data === 'object' && !Array.isArray(data) && data.type === 'alive') beats.heard += 1
+      else posts.push(data)
     },
   } as unknown as Surface
   const draw = () => {
@@ -249,6 +255,10 @@ function mount(first: Props, columns: number, rows: number) {
   }
   return {
     posts,
+    beats,
+    beat() {
+      for (const timer of beats.timers) timer.fn()
+    },
     get tree() {
       return tree
     },
@@ -619,6 +629,26 @@ describe('org.client', () => {
     // an up with no down of its own (it went down outside) opens nothing either
     ui.pointer({ type: 'up', x: k1.left + 2, y: k1.top + 1, button: 'left' })
     expect(ui.posts).toHaveLength(2)
+  })
+
+  test('its beat: one post as it mounts and one each second from a timer started once, however often it draws; the beat after a click is held back, so it never replaces the click', () => {
+    const ui = mount({ agents: [MAIN, ...team(4)], selected: null }, 84, 22)
+    expect(ui.beats.heard).toBe(1)
+    expect(ui.beats.timers.map(timer => timer.ms)).toEqual([1000])
+    ui.props({ agents: [MAIN, ...team(3)], selected: null })
+    ui.beat()
+    ui.beat()
+    expect(ui.beats.timers).toHaveLength(1)
+    expect(ui.beats.heard).toBe(3)
+
+    const k1 = placed(ui.tree, 'k1')
+    ui.pointer({ type: 'down', x: k1.left + 2, y: k1.top + 1, button: 'left' })
+    ui.pointer({ type: 'up', x: k1.left + 2, y: k1.top + 1, button: 'left' })
+    ui.beat()
+    expect(ui.beats.heard).toBe(3)
+    ui.beat()
+    expect(ui.beats.heard).toBe(4)
+    expect(ui.posts).toEqual([{ type: 'open', id: 'k1' }])
   })
 
   test('a drag pans a chart wider than its region and opens nothing; past an edge it stops there; new props keep the pan', () => {

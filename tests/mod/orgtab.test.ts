@@ -4,7 +4,7 @@
  * where the layout puts it, its name opening its page; where the pane cannot
  * hold that chart, the chart's Client, sized by its props, a card it posts
  * opening that agent's page; on the terminal, VS Code and the mobile app,
- * and where the Client failed (`ui.fault`), the agents as an indented tree,
+ * and where the Client fell silent (it failed: no beat), the agents as an indented tree,
  * each row opening the page; the Dashboard's "Org chart →" one press away.
  * The chart's layout and Client themselves are tests/org.test.ts and
  * tests/orgrender.test.ts.
@@ -23,6 +23,9 @@ import { IDS, SAMPLE_NOW, v2Session } from './v2session'
 import { deck, newWorld, world } from './world'
 
 type Surface = 'terminal' | 'desktop' | 'vscode' | 'mobile'
+
+/** How long the hooks module lets a Client go without its beat (register.tsx's SILENT_MS). */
+const SILENT_MS = 3000
 
 function pane<S extends Surface>(surface: S, bodyColumns = 84) {
   return {
@@ -254,13 +257,21 @@ test('the terminal, VS Code and the mobile app list Org as a tree: each under th
   }
 })
 
-test('where the chart`s Client failed (ui.fault) that surface`s Org lists the agents as a tree and says why; leaving Org, or /eagle-eye, tries the Client again; a pane wide enough draws its own chart all the while', async ($, on) => {
-  await demo($, on, sampleState())
+test('where the chart`s Client fell silent (it failed, so its beat stopped) that surface`s Org lists the agents as a tree and says why; leaving Org, or /eagle-eye, tries the Client again; a pane wide enough draws its own chart all the while', async ($, on) => {
+  const { clock } = await demo($, on, sampleState())
   const ui = await $.ui.mount(pane('desktop', 24))
   await press(ui, 'tab:org')
   expect((await ui.find({ type: 'Client' }))?.key).toBe('org')
-  // a region absurdly wide: the instance fails drawing, and the engine says so (ui.fault)
+  // while its beat comes each second the chart stays, however long: the Client's frame clock and the deck's move on together
+  for (let second = 0; second < 12; second++) {
+    await ui.advance(1000)
+    await clock.advance(1000)
+  }
+  await ui.redraw()
+  expect((await ui.find({ type: 'Client' }))?.key).toBe('org')
+  // a region absurdly wide: the instance fails drawing and is unmounted, so its beat stops; within twice SILENT_MS the deck has noticed
   await ui.resize({ columns: 200_000, rows: 400, in: 'org' })
+  await clock.advance(SILENT_MS * 2)
   await ui.redraw()
   expect(await ui.find({ type: 'Client' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^The chart could not draw here, so the agents are listed instead\./ })).toBeDefined()

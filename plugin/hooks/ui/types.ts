@@ -221,8 +221,10 @@ export type DashModel = {
   isDemo: boolean
   /** Why the sample could not be read; '' otherwise. */
   demoNote: string
-  /** Org's chart Client failed on this surface: Org lists the agents as a tree instead, until Org is left (or /eagle-eye opens). */
+  /** Org's chart Client fell silent on this surface: Org lists the agents as a tree instead, until Org is left (or /eagle-eye opens). */
   isOrgDown: boolean
+  /** Called when a drawing holds Org's chart Client: the hooks module then listens for its beat. */
+  onOrgClient?: () => void
   /** The agent Org's chart marks: the one whose page was opened last; null for none. */
   selected: string | null
   /**

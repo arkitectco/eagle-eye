@@ -2214,9 +2214,11 @@ export function reviewFillOf(draft: string, text: string): { text: string; mode:
  * (the request is in the box, for you to send); sent as your next prompt
  * where the session binds no box (`no_composer`: the Desktop app draws its
  * own composer); else refused, saying why. A refusal with no cause is not
- * taken to mean no box exists (a hook's own refusal carries none).
+ * taken to mean no box exists (a hook's own refusal carries none), nor is
+ * one this version does not know (`refusal` is any string: Claude Code adds
+ * causes).
  */
-export function reviewStepOf(filled: { isFilled: boolean; refusal?: 'no_composer' | 'dialog' } | undefined): { kind: 'filled' } | { kind: 'queue' } | { kind: 'failed'; why: string } {
+export function reviewStepOf(filled: { isFilled: boolean; refusal?: string } | undefined): { kind: 'filled' } | { kind: 'queue' } | { kind: 'failed'; why: string } {
   if (filled?.isFilled) return { kind: 'filled' }
   if (filled?.refusal === 'no_composer') return { kind: 'queue' }
   return { kind: 'failed', why: filled?.refusal === 'dialog' ? 'A dialog is open in Claude Code: answer it, then try again' : 'Could not fill the prompt box' }

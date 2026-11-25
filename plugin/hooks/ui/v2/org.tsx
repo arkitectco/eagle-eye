@@ -44,8 +44,8 @@ import { P } from './palette'
 import { num, plural } from './text'
 import { shownTimelineOf, timelineKeysOf, timelineView } from './timeline'
 
-/** How Org stands on this surface: whether its chart's Client failed here (the tree shows instead), and the agent whose page was opened last (the chart marks it). */
-export type OrgSpot = { isDown: boolean; selected: string | null }
+/** How Org stands on this surface: whether its chart's Client fell silent here (the tree shows instead), the agent whose page was opened last (the chart marks it), and what to call when a drawing holds the Client. */
+export type OrgSpot = { isDown: boolean; selected: string | null; onClient?: () => void }
 
 
 /** What a card's type line says: the agent type Claude Code gave; else what kind of loop it is. */
@@ -131,6 +131,7 @@ export function orgTab(kit: Kit, whole: WebStateV2, actions: DashActions, org: O
   }
   if (isClientOn(kit, org) && agents.length > 0) {
     const props = orgPropsOf(agents, org.selected, kit.columns)
+    org.onClient?.()
     return (
       <Box key="org:tab" flexDirection="column" gap={1}>
         {head}

@@ -390,7 +390,6 @@ function cardKeys(tree: unknown, out: string[] = []): string[] {
 test('through the deck, on a desktop pane too narrow for the chart of its own: the Org tab`s Client, measured 1 row tall as the desktop first measures it, draws its chart, and the same told its rows; the terminal lists the tree', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   on('ui.message', () => ({}))
-  on('ui.fault', () => ({}))
   world(on, newWorld(), { v: M.SNAPSHOT_VERSION, data: M.copyOf(sessionOf(7)), view: M.defaultView() })
   await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/repo' })
   await $.command.run(deck(''))
@@ -447,7 +446,6 @@ function charsOf(node: unknown): number {
 test('the desktop`s own chart keeps inside the pane`s bounds: 60 agents nested under three, at the usual width and the widest, as wide as the pane at most, under 2000 elements and 90k characters, 24 avatars moving at most', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   on('ui.message', () => ({}))
-  on('ui.fault', () => ({}))
   world(on, newWorld(), { v: M.SNAPSHOT_VERSION, data: M.copyOf(sessionOf(60)), view: M.defaultView() })
   await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/repo' })
   await $.command.run(deck(''))

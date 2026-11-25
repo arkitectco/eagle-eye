@@ -8,6 +8,8 @@
  * - A drag, or the arrow keys once a click gave it the focus, pans a chart
  *   wider or taller than its region (shift for a card at a time); Home centres it again.
  * - The card under a resting pointer takes a tint; the selected one (props) a brighter border.
+ * - Each second it posts `{ type: 'alive' }`, its beat: an instance that failed
+ *   is unmounted and falls silent, which is how the hooks module learns of it.
  *
  * Sized by its props (orgPropsOf), never by `surface.rows`: the views give the
  * Client `height: rows` and laid the chart out in `columns`, and it draws
@@ -103,6 +105,25 @@ const FIRST_COLUMNS = 80
 /** The most rows drawn, whatever the props say. */
 const MOST_ROWS = 200
 
+/** How often an instance posts its beat. */
+const BEAT_MS = 1000
+
+/** Each instance's beat, by its surface: started once; whether a click was posted since the last one. */
+const beats = new WeakMap<object, { clicked: boolean }>()
+
+/** Starts the instance's beat on its first call: one post now, then one each BEAT_MS for as long as it stays mounted. */
+function startBeat(surface: ClientSurface<OrgState>) {
+  if (beats.has(surface)) return
+  const beat = { clicked: false }
+  beats.set(surface, beat)
+  surface.post({ type: 'alive' })
+  surface.every(BEAT_MS, () => {
+    // a post replaces one not yet delivered: a beat never goes out over a click
+    if (beat.clicked) beat.clicked = false
+    else surface.post({ type: 'alive' })
+  })
+}
+
 /** A pointer held down: where it went down, the pan then, whether it has left that cell, and whether its up may open a card. */
 type Drag = { x: number; y: number; panX: number; panY: number; moved: boolean; opens: boolean }
 
@@ -164,7 +185,11 @@ function onPointer(surface: ClientSurface<OrgState>, event: ClientPointerEvent, 
     const drag = now.drag
     if (!drag) return
     const hit = orgCardAt(layout, view, event.x, event.y)
-    if (!drag.moved && drag.opens && hit !== null) surface.post({ type: 'open', id: hit })
+    if (!drag.moved && drag.opens && hit !== null) {
+      const beat = beats.get(surface)
+      if (beat) beat.clicked = true
+      surface.post({ type: 'open', id: hit })
+    }
     surface.setState({ ...now, drag: null, hover: hit })
     return
   }
@@ -320,6 +345,7 @@ function partsOf(elements: Elements, layout: OrgLayout, view: OrgView, selected:
 
 const Org: ClientModule<OrgProps, OrgState> = (props, surface) => {
   const { Box, Text } = surface.elements
+  startBeat(surface)
   const given: Partial<OrgProps> = props !== null && typeof props === 'object' ? props : {}
   const selected = typeof given.selected === 'string' ? given.selected : null
   // laid out in the columns the views sized the region for; drawn across the region (those columns before its first layout)

@@ -44,7 +44,6 @@ function handles(tree: unknown, out: Record<string, unknown> = {}): Record<strin
 async function opened($: Engine, on: On) {
   const clock = mock.clock(on, { now: NOW })
   on('ui.message', () => ({}))
-  on('ui.fault', () => ({}))
   world(on, newWorld())
   await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/repo' })
   await $.command.run(deck(''))

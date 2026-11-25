@@ -41,10 +41,10 @@ export function deckView(kit: Kit, model: DeckModel, actions: DeckActions, dash:
   const shown = dash.viewing
   const body = shown
     ? shown.state
-      ? v2Deck(deck, shown.state, shown.files, shown.model, shown.actions, false, { isDown: dash.isOrgDown, selected: null })
+      ? v2Deck(deck, shown.state, shown.files, shown.model, shown.actions, false, { isDown: dash.isOrgDown, selected: null, onClient: dash.onOrgClient })
       : pendingDeck(deck, shown.id, shown.row, shown.list, shown.model.isSessionsOpen === true, shown.note, shown.actions)
     : state
-      ? v2Deck(deck, state, dash.v2Files, model, actions, dash.isDemo, { isDown: dash.isOrgDown, selected: dash.selected })
+      ? v2Deck(deck, state, dash.v2Files, model, actions, dash.isDemo, { isDown: dash.isOrgDown, selected: dash.selected, onClient: dash.onOrgClient })
       : quiet(kit, dash.demoNote || 'Reading the sample…')
   return (
     <Box flexDirection="column" gap={1}>

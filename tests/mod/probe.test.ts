@@ -3,6 +3,8 @@ import { expect, mock, test } from 'claude-code/testing'
 
 const NOW = 1_700_000_100_000
 const PROBE = 'eagle-eye-probe'
+/** How long the hooks module lets a Client go without its beat (register.tsx's SILENT_MS). */
+const SILENT_MS = 3000
 const COPPER = '#c9824f'
 
 const PROBE_PANE = {
@@ -177,21 +179,29 @@ test('the probe on each surface: its numbers and a hex colour in native Text, a 
   }
 })
 
-test('a fault: its dim line says when and why, the surface it failed on leaves the Client out, and /eagle-eye probe twice draws it again', async ($, on) => {
-  mock.clock(on, { now: NOW })
+test('a Client that failed falls silent: the beats line says so, the surface it failed on leaves the Client out, and /eagle-eye probe twice draws it again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
   world(on)
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
   await $.command.run(deck('probe'))
 
   const desktop = await $.ui.mount({ plugin: 'eagle-eye', surface: 'desktop', component: 'Pane', requestId: PROBE, viewport: VIEWPORT, props: PROBE_PANE })
   expect(await desktop.find({ type: 'Text', text: 'ui.message: none yet' })).toBeDefined()
-  expect(await desktop.find({ type: 'Text', text: 'ui.fault: none' })).toBeDefined()
+  // its beat comes each second: the Client stays, and the beats line counts them
+  for (let second = 0; second < 9; second++) {
+    await desktop.advance(1000, { in: 'probe' })
+    await clock.advance(1000)
+  }
+  expect(await desktop.find({ type: 'Client', key: 'probe' })).toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: /^beats: (9|10) heard$/ })).toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: 'ui.message: none yet' })).toBeDefined()
 
-  // a region absurdly wide: the ruler takes the tree past its 100,000 characters, and the instance fails drawing
+  // a region absurdly wide: the ruler takes the tree past its 100,000 characters, the instance fails drawing and is unmounted, and its beat stops
   await desktop.resize({ columns: 200_000, rows: 14, in: 'probe' })
-  expect(await desktop.find({ type: 'Text', text: /^ui\.fault: render on desktop: \S/ })).toBeDefined()
+  await clock.advance(SILENT_MS * 2)
+  expect(await desktop.find({ type: 'Text', text: /^beats: \d+ heard, then none for 3 s on desktop: / })).toBeDefined()
   expect(await desktop.find({ type: 'Client' })).toBeUndefined()
-  expect(await desktop.find({ type: 'Text', text: /left out here after its fault/ })).toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: /left out here after it fell silent/ })).toBeDefined()
   await desktop.unmount()
 
   // the terminal's Client did not fail: it still draws there
@@ -204,6 +214,6 @@ test('a fault: its dim line says when and why, the surface it failed on leaves t
   await $.command.run(deck('probe'))
   const again = await $.ui.mount({ plugin: 'eagle-eye', surface: 'desktop', component: 'Pane', requestId: PROBE, viewport: VIEWPORT, props: PROBE_PANE })
   expect(await again.find({ type: 'Client', key: 'probe' })).toBeDefined()
-  expect(await again.find({ type: 'Text', text: 'ui.fault: none' })).toBeDefined()
+  expect(await again.find({ type: 'Text', text: /^beats: \d+ heard$/ })).toBeDefined()
   await again.unmount()
 })
