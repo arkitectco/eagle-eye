@@ -184,7 +184,9 @@ function webNote(web: WebPane | undefined): { text: string; color: string } {
  * The web page and how it stands: "Open in browser", which opens it in your
  * own browser, each press its own one-time link (`actions.openBrowser`, as
  * the header's, ./deck, and /eagle-eye web), the page started first when it
- * is off; "Starting…" in its place meanwhile. Never a link the surface
+ * is off; "Starting…" in its place meanwhile. On the desktop, "Open in
+ * Claude's browser" beside it asks the Browser pane instead
+ * (`actions.openBrowserPane`, as /eagle-eye web pane). Never a link the surface
  * opens itself, which the Desktop may open in its Browser pane; the
  * terminal shows the running page's link (`web.url`) as text to copy: a
  * link opens one page, and the deck shows a new one once it was used.
@@ -198,6 +200,11 @@ function webSection(kit: Kit, web: WebPane | undefined, actions: DashActions): R
       <Box flexShrink={0}>
         <Button key="settings:web:open-browser" label={isStarting ? 'Starting…' : 'Open in browser'} onPress={() => actions.openBrowser()} />
       </Box>
+      {kit.surface !== 'terminal' && !isStarting ? (
+        <Box flexShrink={0} marginLeft={2}>
+          <Button key="settings:web:open-pane" label="Open in Claude's browser" onPress={() => actions.openBrowserPane()} />
+        </Box>
+      ) : null}
     </Box>,
     <Text key="settings:web:note" color={note.color} wrap="wrap">
       {note.text}

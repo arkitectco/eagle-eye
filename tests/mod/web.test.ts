@@ -857,10 +857,9 @@ test('the pane: with no Browser pane to open the web deck in, the header`s Open 
   expect((await ui.find({ key: 'settings:web:open-browser' }))?.props.label).toBe('Open in browser')
   expect(await ui.find({ key: 'settings:web:link' })).toBeUndefined()
   expect(await ui.find({ key: 'web:open' })).toBeUndefined()
-  // no button for Claude's Browser pane, nor a word about it: /eagle-eye web pane alone asks it again
-  expect(await ui.find({ key: 'settings:web:open-pane' })).toBeUndefined()
-  expect(JSON.stringify(await ui.drawn())).not.toMatch(/Browser pane|Claude can drive/)
-  await $.command.run(deck('web pane'))
+  // Open in Claude's browser asks the Browser pane again, as /eagle-eye web pane does: a pane link, nothing in your own browser
+  expect((await ui.find({ key: 'settings:web:open-pane' }))?.props.label).toBe("Open in Claude's browser")
+  await ui.press({ key: 'settings:web:open-pane' })
   await clock.settle()
   expect(w.opened.map(one => one.server)).toEqual(['Claude_Browser', 'Claude Browser', 'Claude_Browser', 'Claude Browser'])
   expect(linkOf(w).ticket).toMatch(/^p-/)

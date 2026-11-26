@@ -114,6 +114,8 @@ export type Actions = {
   selectRepo: (root: string) => void
   /** "Open in browser" (the header's, `o`, and Settings'), as `/eagle-eye web`: starts the web deck first when it is not running (never in the Browser pane; a press while it starts does nothing), then a new `full` link to the page, opened in your own browser by the system's opener (a toast when it could not). */
   openBrowser: () => void
+  /** "Open in Claude's browser" (Settings', on the desktop alone), as `/eagle-eye web pane`: starts the web deck first when it is not running, then asks the Browser pane to open it with a new `pane` link, whose words in your voice wait for your Send (../hold). */
+  openBrowserPane: () => void
   /** Send on a band row the Browser pane's page sent in your voice (../hold): it runs as your own browser's page would have run it at once. */
   sendHeld: (key: string) => void
   /** Discard on such a row: nothing is sent, and the page says so. */

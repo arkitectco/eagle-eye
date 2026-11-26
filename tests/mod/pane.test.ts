@@ -382,10 +382,9 @@ test('5 opens Inspect, its sections folded to one line each, and Spend (the cont
     await press(ui, 'tab:settings')
     expect((await ui.find({ key: 'tab:settings' }))?.props.dimColor).toBe(false)
     expect(await ui.find({ key: 'inspect:tile:context' })).toBeUndefined()
-    // the web page: off, Open in browser starts it and opens it in your own browser (as /eagle-eye web); no button for Claude's Browser pane on any surface
+    // the web page: off, Open in browser starts it and opens it in your own browser (as /eagle-eye web); Open in Claude's browser beside it on the desktop alone, since a terminal has no Browser pane
     expect((await ui.find({ key: 'settings:web:open-browser' }))?.props.label).toBe('Open in browser')
-    expect(await ui.find({ key: 'settings:web:open-pane' })).toBeUndefined()
-    expect(JSON.stringify(await ui.drawn())).not.toMatch(/Browser pane|Claude can drive/)
+    expect((await ui.find({ key: 'settings:web:open-pane' }))?.props.label).toBe(surface === 'terminal' ? undefined : "Open in Claude's browser")
     expect(await ui.find({ key: 'web:open' })).toBeUndefined()
     expect(await ui.find({ key: 'settings:web:link' })).toBeUndefined()
     // Help: each tab, then the keys that are left

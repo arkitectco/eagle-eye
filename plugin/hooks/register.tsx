@@ -1801,6 +1801,7 @@ function actionsFor($: EngineInterface): DeckActions {
       void openPane($)
     },
     openBrowser: () => void openOwnBrowser($),
+    openBrowserPane: () => void openWeb($, 'pane'),
     // the band's rows of what the Browser pane's page sent in your voice (./hold): your Send runs it, Discard drops it, More shows it whole
     sendHeld: key => sendHeldMessage($, key),
     discardHeld: key => discardHeldMessage($, key),
@@ -5434,7 +5435,7 @@ async function isTerminalOnly($: EngineInterface): Promise<boolean> {
  * `/eagle-eye web`: the page in your own browser, as Open in browser opens it
  * (`openOwnBrowser`: started first when it is not running, a `full` link
  * made for it on web/open.js's stdin). `/eagle-eye web pane` (`where`
- * `pane`), which nothing in the deck offers: started if need be,
+ * `pane`), as Settings' "Open in Claude's browser" on the desktop: started if need be,
  * then the Browser pane (left to run) asked to open it with a new `pane`
  * ticket, whose words in your voice wait for your Send (./hold); in a
  * session that draws only in a terminal, which has no Browser pane, no pane
